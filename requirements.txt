@@ -1,0 +1,2 @@
+# python -m venv c:/virtualenvs/table-parse-split-venv
+lxml
