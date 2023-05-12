@@ -8,6 +8,8 @@ from tqdm import tqdm
 import tabledetect
 import numpy as np
 import cv2 as cv
+import matplotlib.pyplot as plt
+from typing import Literal
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -17,9 +19,9 @@ PATH_IN = Path(r"F:\ml-parsing-project\data")
 PROJECT = "parse_activelearning1_jpg"
 
 IMAGE_FORMAT = '.jpg'
-THRESHOLD_EXPANSION = 50
-THRESHOLD_PATTERN = 3
-THRESHOLD_WHITES = 3
+THRESHOLDS_ROWS = {'expansion': 50, 'pattern': 3, 'whites': 3}
+THRESHOLDS_COLUMNS = {'expansion': 50, 'pattern': 1, 'whites': 1}
+
 
 # Path things
 pathLabels = PATH_IN / PROJECT / 'labels'
@@ -27,6 +29,79 @@ pathLabels_separators_narrow = PATH_DATA / 'labels' / 'narrow'
 pathLabels_separators_wide = PATH_DATA / 'labels' / 'wide'
 os.makedirs(pathLabels_separators_narrow, exist_ok=True)
 os.makedirs(pathLabels_separators_wide, exist_ok=True)
+
+def tryCatch(func):
+    def wrapper_tryCatch(bbox, **kwargs):
+        try:
+            return func(bbox, **kwargs)
+
+        except ValueError:
+            return bbox
+    return wrapper_tryCatch
+
+# Helper functions
+@tryCatch
+def widenBbox(bbox, minCoord:Literal['ymin', 'xmin'], maxCoord:Literal['ymax', 'xmax'], shapeIndex, patterns, whites, thresholds):
+    # Thresholds
+
+
+    # Get edges of narrow bbox
+    minEdge = bbox[minCoord]
+    maxEdge = bbox[maxCoord]+1
+
+    # crop = img[ymin-THRESHOLD_EXPANSION:ymax+THRESHOLD_EXPANSION]
+    # crop = img[ymin-2:ymax+2]
+    # cv.imshow("cropped", crop)
+
+    pattern_this = patterns[minEdge:maxEdge]
+    whites_this = whites[minEdge:maxEdge]
+
+    patterns_before = patterns[minEdge-thresholds['expansion']:minEdge]
+    patterns_before_difference = np.abs(patterns_before - pattern_this.reshape((-1, 1)))
+    patterns_before_difference = np.min(patterns_before_difference, axis=0)
+    patterns_before_similar = patterns_before_difference <= thresholds['pattern']
+    try:
+        patterns_before_furthestsimilar = np.where(np.flip(patterns_before_similar) == False)[0][0]
+    except IndexError:
+        patterns_before_furthestsimilar = thresholds['expansion']
+
+    patterns_after = patterns[maxEdge+1:maxEdge+1+thresholds['expansion']]
+    patterns_after_difference = np.abs(patterns_after - pattern_this.reshape((-1, 1)))
+    patterns_after_difference = np.min(patterns_after_difference, axis=0)
+    patterns_after_similar = patterns_after_difference <= thresholds['pattern']
+    try:
+        patterns_after_furthestsimilar = np.where(patterns_after_similar == False)[0][0]
+    except IndexError:
+        patterns_after_furthestsimilar = thresholds['expansion']
+
+    whites_before = whites[minEdge-thresholds['expansion']:minEdge]
+    whites_before_difference = np.abs(whites_before - whites_this.reshape((-1, 1)))
+    whites_before_difference = np.min(whites_before_difference, axis=0)
+    whites_before_similar = whites_before_difference <= thresholds['whites']
+    try:
+        whites_before_furthestsimilar = np.where(np.flip(whites_before_similar) == False)[0][0]
+    except IndexError:
+        whites_before_furthestsimilar = thresholds['expansion']
+
+    whites_after = whites[maxEdge+1:maxEdge+1+thresholds['expansion']]
+    whites_after_difference = np.abs(whites_after - whites_this.reshape((-1, 1)))
+    whites_after_difference = np.min(whites_after_difference, axis=0)
+    whites_after_similar = whites_after_difference <= thresholds['whites']
+    try:
+        whites_after_furthestsimilar = np.where(whites_after_similar == False)[0][0]
+    except IndexError:
+        whites_after_furthestsimilar = thresholds['expansion']
+
+    bbox_wide = deepcopy(bbox)
+    bbox_wide[minCoord] = bbox_wide[minCoord] - min(patterns_before_furthestsimilar, whites_before_furthestsimilar)
+    bbox_wide[maxCoord] = bbox_wide[maxCoord] + min(patterns_after_furthestsimilar, whites_after_furthestsimilar)
+
+    if bbox_wide[minCoord] < 0:
+        bbox_wide[minCoord] = 0
+    if bbox_wide[maxCoord] > img.shape[shapeIndex]:
+        bbox_wide[maxCoord] = img.shape[shapeIndex]
+
+    return bbox_wide
 
 # Convert row/column annotations to separator annotations
 labelFiles = list(os.scandir(pathLabels))
@@ -61,78 +136,26 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
     row_bboxes_narrow = [{'xmin': table['xmin'], 'ymin': row_separator[0], 'xmax': table['xmax'], 'ymax': row_separator[1]} for row_separator in row_separators]
 
     # XML | Rows | Widen
-    import matplotlib.pyplot as plt
     row_patterns = np.asarray([np.absolute(np.diff(row)).mean()*100 for row in img01])
     row_whites = np.asarray([np.mean(row)*100 for row in img01])
 
-    row_bboxes_wide = []
-    for rowbbox in row_bboxes_narrow:
-        ymin = rowbbox['ymin']
-        ymax = rowbbox['ymax']+1
-
-        crop = img[ymin-THRESHOLD_EXPANSION:ymax+THRESHOLD_EXPANSION]
-        # crop = img[ymin-2:ymax+2]
-        # cv.imshow("cropped", crop)
-
-        pattern_this = row_patterns[ymin:ymax]
-        whites_this = row_whites[ymin:ymax]
-
-        patterns_before = row_patterns[ymin-THRESHOLD_EXPANSION:ymin]
-        patterns_before_difference = np.abs(patterns_before - pattern_this.reshape((-1, 1)))
-        patterns_before_difference = np.min(patterns_before_difference, axis=0)
-        patterns_before_similar = patterns_before_difference <= THRESHOLD_PATTERN
-        try:
-            patterns_before_furthestsimilar = np.where(np.flip(patterns_before_similar) == False)[0][0]
-        except IndexError:
-            patterns_before_furthestsimilar = THRESHOLD_EXPANSION
-
-        patterns_after = row_patterns[ymax+1:ymax+1+THRESHOLD_EXPANSION]
-        patterns_after_difference = np.abs(patterns_after - pattern_this.reshape((-1, 1)))
-        patterns_after_difference = np.min(patterns_after_difference, axis=0)
-        patterns_after_similar = patterns_after_difference <= THRESHOLD_PATTERN
-        try:
-            patterns_after_furthestsimilar = np.where(patterns_after_similar == False)[0][0]
-        except IndexError:
-            patterns_after_furthestsimilar = THRESHOLD_EXPANSION
-
-        whites_before = row_whites[ymin-THRESHOLD_EXPANSION:ymin]
-        whites_before_difference = np.abs(whites_before - whites_this.reshape((-1, 1)))
-        whites_before_difference = np.min(whites_before_difference, axis=0)
-        whites_before_similar = whites_before_difference <= THRESHOLD_WHITES
-        try:
-            whites_before_furthestsimilar = np.where(np.flip(whites_before_similar) == False)[0][0]
-        except IndexError:
-            whites_before_furthestsimilar = THRESHOLD_EXPANSION
-
-        whites_after = row_whites[ymax+1:ymax+1+THRESHOLD_EXPANSION]
-        whites_after_difference = np.abs(whites_after - whites_this.reshape((-1, 1)))
-        whites_after_difference = np.min(whites_after_difference, axis=0)
-        whites_after_similar = whites_after_difference <= THRESHOLD_WHITES
-        try:
-            whites_after_furthestsimilar = np.where(whites_after_similar == False)[0][0]
-        except IndexError:
-            whites_after_furthestsimilar = THRESHOLD_EXPANSION
-
-        rowbbox_wide = deepcopy(rowbbox)
-        rowbbox_wide['ymin'] = rowbbox_wide['ymin'] - min(patterns_before_furthestsimilar, whites_before_furthestsimilar)
-        rowbbox_wide['ymax'] = rowbbox_wide['ymax'] + min(patterns_after_furthestsimilar, whites_after_furthestsimilar)
-
-        if rowbbox_wide['ymin'] < 0:
-            rowbbox_wide['ymin'] = 0
-        if rowbbox_wide['ymax'] > img.shape[0]:
-            rowbbox_wide['ymax'] = img.shape[0]
-
-        row_bboxes_wide.append(rowbbox_wide)
-
+    row_bboxes_wide = [widenBbox(bbox=rowbbox, minCoord='ymin', maxCoord='ymax', shapeIndex=0, patterns=row_patterns, whites=row_whites, thresholds=THRESHOLDS_ROWS) for rowbbox in row_bboxes_narrow]
+    
     # XML | Columns
     # XML | Columns | Get separation location
     col_edges = [(float(col.find('.//xmin').text), float(col.find('.//xmax').text)) for col in cols]
     col_edges = sorted(col_edges, key= lambda x: x[0])
 
     col_separators = [(col_edges[i][1], col_edges[i+1][0]) for i in range(len(col_edges)-1)]
-    col_separators = [(floor(min(tuple)), ceil(max(tuple))) for tuple in col_separators]
+    col_separators = [(floor(min(tuple))-1, ceil(max(tuple))+1) for tuple in col_separators]
 
-    col_bbox_narrow = [{'ymin': table['ymin'], 'xmin': col_separator[0], 'ymax': table['ymax'], 'xmax': col_separator[1]} for col_separator in col_separators]
+    col_bboxes_narrow = [{'ymin': table['ymin'], 'xmin': col_separator[0], 'ymax': table['ymax'], 'xmax': col_separator[1]} for col_separator in col_separators]
+
+    # XML | Columns | Widen
+    col_patterns = np.asarray([np.absolute(np.diff(img01[:, colIndex])).mean()*100 for colIndex in range(img01.shape[1])])
+    col_whites = np.asarray([np.mean(img01[:, colIndex])*100 for colIndex in range(img01.shape[1])])
+
+    col_bboxes_wide = [widenBbox(bbox=colbbox, minCoord='xmin', maxCoord='xmax', shapeIndex=1, patterns=col_patterns, whites=col_whites, thresholds=THRESHOLDS_COLUMNS) for colbbox in col_bboxes_narrow]
 
 
     # XML | Write separator annotation
@@ -145,7 +168,7 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
             _ = etree.SubElement(xml_bbox, edge)
             _.text = str(row_bbox[edge])
         label = etree.SubElement(xml_obj, 'name'); label.text = 'row separator'
-    for col_bbox in col_bbox_narrow:        # object = extractedTable['objects'][0]
+    for col_bbox in col_bboxes_narrow:        # object = extractedTable['objects'][0]
         xml_obj = etree.SubElement(separatorXml, 'object')
         xml_bbox = etree.SubElement(xml_obj, 'bndbox')
         for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
@@ -165,17 +188,17 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
             _ = etree.SubElement(xml_bbox, edge)
             _.text = str(row_bbox[edge])
         label = etree.SubElement(xml_obj, 'name'); label.text = 'row separator'
-    # for col_bbox in col_bbox_narrow:        # object = extractedTable['objects'][0]
-    #     xml_obj = etree.SubElement(separatorXml, 'object')
-    #     xml_bbox = etree.SubElement(xml_obj, 'bndbox')
-    #     for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
-    #         _ = etree.SubElement(xml_bbox, edge)
-    #         _.text = str(col_bbox[edge])
-    #     label = etree.SubElement(xml_obj, 'name'); label.text = 'column separator'
+    for col_bbox in col_bboxes_wide:        # object = extractedTable['objects'][0]
+        xml_obj = etree.SubElement(separatorXml, 'object')
+        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
+        for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
+            _ = etree.SubElement(xml_bbox, edge)
+            _.text = str(col_bbox[edge])
+        label = etree.SubElement(xml_obj, 'name'); label.text = 'column separator'
 
     tree = etree.ElementTree(separatorXml)
     tree.write(pathLabels_separators_wide / labelFileEntry.name, pretty_print=True, xml_declaration=False, encoding="utf-8") 
 
 # Plot
-tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_narrow, path_output=PATH_DATA / 'images_annotated' / 'narrow', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False})
+tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_narrow, path_output=PATH_DATA / 'images_annotated' / 'narrow', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False, 'as_area': True})
 tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_wide, path_output=PATH_DATA / 'images_annotated' / 'wide', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False, 'as_area': True})
