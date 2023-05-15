@@ -6,10 +6,13 @@ from math import floor, ceil
 from copy import deepcopy
 from tqdm import tqdm
 import tabledetect
+import shutil
 import numpy as np
 import cv2 as cv
 import matplotlib.pyplot as plt
 from typing import Literal
+from datetime import datetime
+import json
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -22,14 +25,27 @@ IMAGE_FORMAT = '.jpg'
 THRESHOLDS_ROWS = {'expansion': 50, 'pattern': 3, 'whites': 3}
 THRESHOLDS_COLUMNS = {'expansion': 50, 'pattern': 1, 'whites': 1}
 
-
 # Path things
 pathLabels = PATH_IN / PROJECT / 'labels'
 pathLabels_separators_narrow = PATH_DATA / 'labels' / 'narrow'
 pathLabels_separators_wide = PATH_DATA / 'labels' / 'wide'
-os.makedirs(pathLabels_separators_narrow, exist_ok=True)
-os.makedirs(pathLabels_separators_wide, exist_ok=True)
+pathLabels_yolo = PATH_DATA / 'labels_yolo'
+pathErrors = PATH_DATA / 'errors' / f"{datetime.now().strftime('%Y_%m_%d-%H_%M')}.tsv"
 
+if os.path.exists(PATH_DATA):
+    shutil.rmtree(PATH_DATA)
+    os.makedirs(PATH_DATA)
+os.makedirs(pathLabels_separators_narrow)
+os.makedirs(pathLabels_separators_wide)
+os.makedirs(pathLabels_yolo)
+os.makedirs(pathErrors.parent)
+
+
+# Errors
+class MinMaxError(ValueError):
+    ...
+
+# Helper functions
 def tryCatch(func):
     def wrapper_tryCatch(bbox, **kwargs):
         try:
@@ -39,12 +55,8 @@ def tryCatch(func):
             return bbox
     return wrapper_tryCatch
 
-# Helper functions
 @tryCatch
 def widenBbox(bbox, minCoord:Literal['ymin', 'xmin'], maxCoord:Literal['ymax', 'xmax'], shapeIndex, patterns, whites, thresholds):
-    # Thresholds
-
-
     # Get edges of narrow bbox
     minEdge = bbox[minCoord]
     maxEdge = bbox[maxCoord]+1
@@ -103,102 +115,225 @@ def widenBbox(bbox, minCoord:Literal['ymin', 'xmin'], maxCoord:Literal['ymax', '
 
     return bbox_wide
 
+def constrainToShape(bbox, shape):
+    constrainedBbox = {}
+    constrainedBbox['xmin'] = max(0, bbox['xmin'])
+    constrainedBbox['ymin'] = max(0, bbox['ymin'])
+    constrainedBbox['xmax'] = min(shape[1], bbox['xmax'])
+    constrainedBbox['ymax'] = min(shape[0], bbox['ymax'])
+    return constrainedBbox
+
+def isCellSeparatorEdge(separatorBbox, cellBbox, orientation:Literal['row', 'column']) -> False:
+    minCoord = 'ymin' if orientation == 'row' else 'xmin'
+    maxCoord = 'ymax' if orientation == 'row' else 'xmax'
+
+    # Check first edge
+    edge1_someOverlap       = (separatorBbox[maxCoord] >= cellBbox[minCoord])
+    edge1_incompleteOverlap = (separatorBbox[minCoord] <= cellBbox[minCoord])
+    if (edge1_someOverlap) and (edge1_incompleteOverlap):
+        return True
+
+    # Check second edge
+    edge2_someOverlap       = (separatorBbox[minCoord] <= cellBbox[maxCoord])
+    edge2_incompleteOverlap = (separatorBbox[maxCoord] >= cellBbox[maxCoord])
+    if (edge2_someOverlap) and (edge2_incompleteOverlap):
+        return True
+    
+    # Neither are edge
+    return False
+
+def cellToInterior(rowSeparatorBboxes:list[dict], colSeparatorBboxes:list[dict], cellBbox, bboxConstraint:tuple):
+    # Check which separators will slice
+    borderEdges = {}
+    borderEdges['xmin'] = [separatorBbox['xmax'] for separatorBbox in colSeparatorBboxes if (separatorBbox['xmin'] <= cellBbox['xmin']) and (separatorBbox['xmax'] >= cellBbox['xmin'])]
+    borderEdges['xmax'] = [separatorBbox['xmin'] for separatorBbox in colSeparatorBboxes if (separatorBbox['xmax'] >= cellBbox['xmax']) and (separatorBbox['xmin'] <= cellBbox['xmax'])]
+    borderEdges['ymin'] = [separatorBbox['ymax'] for separatorBbox in rowSeparatorBboxes if (separatorBbox['ymin'] <= cellBbox['ymin']) and (separatorBbox['ymax'] >= cellBbox['ymin'])]
+    borderEdges['ymax'] = [separatorBbox['ymin'] for separatorBbox in rowSeparatorBboxes if (separatorBbox['ymax'] >= cellBbox['ymax']) and (separatorBbox['ymin'] <= cellBbox['ymax'])]
+
+    # Set border to separator edge +1 if present, otherwise retain original
+    interiorCell = {}
+    for edgeName in borderEdges:
+        adjustmentFactor = 1 if 'min' in edgeName else -1
+        interiorCell[edgeName] = cellBbox[edgeName] if not borderEdges[edgeName] else borderEdges[edgeName][0] + adjustmentFactor
+    interiorCell = constrainToShape(bbox=interiorCell, shape=bboxConstraint)
+
+    # Check cell dimensions for errors (normally caused by separator eclipsing cells)
+    errorMessage = 'Faulty annotation ({}): max exceeds min.'
+    if (interiorCell['xmin'] >= interiorCell['xmax']):
+        raise MinMaxError(errorMessage.format('col'))
+    if (interiorCell['ymin'] >= interiorCell['ymax']):
+        raise MinMaxError(errorMessage.format('row'))
+        
+    return interiorCell
+
+def writeBboxToXml(bboxes:list, xmlRoot:etree.Element, label:str):
+    if not isinstance(bboxes, list):
+        bboxes = [bboxes]
+    for bbox in bboxes:
+        xml_obj = etree.SubElement(xmlRoot, 'object')
+        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
+        for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
+            _ = etree.SubElement(xml_bbox, edge)
+            _.text = str(bbox[edge])
+        xml_label = etree.SubElement(xml_obj, 'name'); xml_label.text = label
+
 # Convert row/column annotations to separator annotations
 labelFiles = list(os.scandir(pathLabels))
 for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
+    faultyAnnotation = []
+
     # Image | Convert to monochrome B/W
     filename = os.path.splitext(labelFileEntry.name)[0]
     pathImg = PATH_IN / PROJECT / 'selected' / f'{filename}{IMAGE_FORMAT}'
     img = cv.imread(str(pathImg), cv.IMREAD_GRAYSCALE)
     thres, img = cv.threshold(img, 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
     img01 = np.divide(img, 255).astype('float32')
-    # cv.imshow('window', img); cv.waitKey(0); cv.destroyAllWindows
 
     # XML | Parse annotation
     root = etree.parse(labelFileEntry.path)
-    tableEl = root.find('object[name="table"]')
-    rows = root.findall('object[name="table row"]')
-    cols = root.findall('object[name="table column"]')
+    objectCount = len(root.findall('.//object'))
+    if objectCount != 0:
+        tableEl = root.find('object[name="table"]')
+        rows = root.findall('object[name="table row"]')
+        cols = root.findall('object[name="table column"]')
+        spanners = root.findall('object[name="table spanning cell"]')
 
-    # XML | Table
-    table = {el.tag:float(el.text) for el in tableEl.find('bndbox').getchildren()}
-    for key, val in table.items():
-        table[key] = floor(val) if 'min' in key else ceil(val)
-    
-    # XML | Rows 
-    # XML | Rows | Get separation location
-    row_edges = [(float(row.find('.//ymin').text), float(row.find('.//ymax').text)) for row in rows]
-    row_edges = sorted(row_edges, key= lambda x: x[0])
+        # XML | Table
+        table = {el.tag:float(el.text) for el in tableEl.find('bndbox').getchildren()}
+        for key, val in table.items():
+            table[key] = floor(val) if 'min' in key else ceil(val)
+        
+        # XML | Rows 
+        # XML | Rows | Get separation location
+        row_edges = [(float(row.find('.//ymin').text), float(row.find('.//ymax').text)) for row in rows]
+        row_edges = sorted(row_edges, key= lambda x: x[0])
 
-    row_separators = [(row_edges[i][1], row_edges[i+1][0]) for i in range(len(row_edges)-1)]
-    row_separators = [(floor(min(tuple)), floor(max(tuple))) for tuple in row_separators]
+        row_separators = [(row_edges[i][1], row_edges[i+1][0]) for i in range(len(row_edges)-1)]
+        row_separators = [(floor(min(tuple)), floor(max(tuple))) for tuple in row_separators]
 
-    row_bboxes_narrow = [{'xmin': table['xmin'], 'ymin': row_separator[0], 'xmax': table['xmax'], 'ymax': row_separator[1]} for row_separator in row_separators]
+        row_bboxes_narrow = [{'xmin': table['xmin'], 'ymin': row_separator[0], 'xmax': table['xmax'], 'ymax': row_separator[1]} for row_separator in row_separators]
 
-    # XML | Rows | Widen
-    row_patterns = np.asarray([np.absolute(np.diff(row)).mean()*100 for row in img01])
-    row_whites = np.asarray([np.mean(row)*100 for row in img01])
+        # XML | Rows | Widen
+        row_patterns = np.asarray([np.absolute(np.diff(row)).mean()*100 for row in img01])
+        row_whites = np.asarray([np.mean(row)*100 for row in img01])
 
-    row_bboxes_wide = [widenBbox(bbox=rowbbox, minCoord='ymin', maxCoord='ymax', shapeIndex=0, patterns=row_patterns, whites=row_whites, thresholds=THRESHOLDS_ROWS) for rowbbox in row_bboxes_narrow]
-    
-    # XML | Columns
-    # XML | Columns | Get separation location
-    col_edges = [(float(col.find('.//xmin').text), float(col.find('.//xmax').text)) for col in cols]
-    col_edges = sorted(col_edges, key= lambda x: x[0])
+        row_bboxes_wide = [widenBbox(bbox=rowbbox, minCoord='ymin', maxCoord='ymax', shapeIndex=0, patterns=row_patterns, whites=row_whites, thresholds=THRESHOLDS_ROWS) for rowbbox in row_bboxes_narrow]
+        
+        # XML | Columns
+        # XML | Columns | Get separation location
+        col_edges = [(float(col.find('.//xmin').text), float(col.find('.//xmax').text)) for col in cols]
+        col_edges = sorted(col_edges, key= lambda x: x[0])
 
-    col_separators = [(col_edges[i][1], col_edges[i+1][0]) for i in range(len(col_edges)-1)]
-    col_separators = [(floor(min(tuple))-1, ceil(max(tuple))+1) for tuple in col_separators]
+        col_separators = [(col_edges[i][1], col_edges[i+1][0]) for i in range(len(col_edges)-1)]
+        col_separators = [(floor(min(tuple))-1, ceil(max(tuple))+1) for tuple in col_separators]
 
-    col_bboxes_narrow = [{'ymin': table['ymin'], 'xmin': col_separator[0], 'ymax': table['ymax'], 'xmax': col_separator[1]} for col_separator in col_separators]
+        col_bboxes_narrow = [{'ymin': table['ymin'], 'xmin': col_separator[0], 'ymax': table['ymax'], 'xmax': col_separator[1]} for col_separator in col_separators]
 
-    # XML | Columns | Widen
-    col_patterns = np.asarray([np.absolute(np.diff(img01[:, colIndex])).mean()*100 for colIndex in range(img01.shape[1])])
-    col_whites = np.asarray([np.mean(img01[:, colIndex])*100 for colIndex in range(img01.shape[1])])
+        # XML | Columns | Widen
+        col_patterns = np.asarray([np.absolute(np.diff(img01[:, colIndex])).mean()*100 for colIndex in range(img01.shape[1])])
+        col_whites = np.asarray([np.mean(img01[:, colIndex])*100 for colIndex in range(img01.shape[1])])
 
-    col_bboxes_wide = [widenBbox(bbox=colbbox, minCoord='xmin', maxCoord='xmax', shapeIndex=1, patterns=col_patterns, whites=col_whites, thresholds=THRESHOLDS_COLUMNS) for colbbox in col_bboxes_narrow]
+        col_bboxes_wide = [widenBbox(bbox=colbbox, minCoord='xmin', maxCoord='xmax', shapeIndex=1, patterns=col_patterns, whites=col_whites, thresholds=THRESHOLDS_COLUMNS) for colbbox in col_bboxes_narrow]
 
+
+        # XML | Spanning cells
+        # XML | Spanning cells | Get location
+        spans = [spanElement.find('.//bndbox') for spanElement in spanners]
+        spans = map(lambda el: {child.tag: float(child.text) for child in el.getchildren()}, spans)
+        spans = list(map(lambda edges: {key: floor(value) if 'min' in key else ceil(value) for key, value in edges.items()}, spans))
+
+        # XML | Convert to interior (remove borders)
+        spanInteriors_narrow = []
+        spanInteriors_wide = []
+        for span in spans:      # span = spans[0]
+            span_narrowSeparators_rows = list(filter(lambda bbox: isCellSeparatorEdge(separatorBbox=bbox, cellBbox=span, orientation='row'), row_bboxes_narrow))
+            span_narrowSeparators_cols = list(filter(lambda bbox: isCellSeparatorEdge(separatorBbox=bbox, cellBbox=span, orientation='col'), col_bboxes_narrow))
+            try:
+                span_narrowInterior = cellToInterior(rowSeparatorBboxes=span_narrowSeparators_rows, colSeparatorBboxes=span_narrowSeparators_cols, cellBbox=span, bboxConstraint=img.shape)
+                spanInteriors_narrow.append(span_narrowInterior)
+            except MinMaxError as e:
+                with open(pathErrors, 'a+') as f:
+                    f.write(f'{labelFileEntry.name}\tnarrow span\n')
+                tqdm.write(str(e))
+                faultyAnnotation.append('narrow')
+            del span_narrowSeparators_cols, span_narrowSeparators_rows
+
+            span_wideSeparators_rows = list(filter(lambda bbox: isCellSeparatorEdge(separatorBbox=bbox, cellBbox=span, orientation='row'), row_bboxes_wide))
+            span_wideSeparators_cols = list(filter(lambda bbox: isCellSeparatorEdge(separatorBbox=bbox, cellBbox=span, orientation='col'), col_bboxes_wide))
+            try:
+                span_wideInterior = cellToInterior(rowSeparatorBboxes=span_wideSeparators_rows, colSeparatorBboxes=span_wideSeparators_cols, cellBbox=span, bboxConstraint=img.shape)
+                spanInteriors_wide.append(span_wideInterior)
+            except MinMaxError as e:
+                with open(pathErrors, 'a+') as f:
+                    f.write(f'{labelFileEntry.name}\twide span\n')
+                tqdm.write(str(e))
+                faultyAnnotation.append('wide')
+            del span_wideSeparators_cols, span_wideSeparators_rows
+    else:
+        row_bboxes_narrow = []
+        row_bboxes_wide = []
+        col_bboxes_narrow = []
+        col_bboxes_wide = []
+        spanInteriors_narrow = []
+        spanInteriors_wide = []
+        
 
     # XML | Write separator annotation
     # XML | Write separator annotation | Narrow
-    separatorXml = etree.Element('annotation')
-    for row_bbox in row_bboxes_narrow:        # object = extractedTable['objects'][0]
-        xml_obj = etree.SubElement(separatorXml, 'object')
-        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
-        for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
-            _ = etree.SubElement(xml_bbox, edge)
-            _.text = str(row_bbox[edge])
-        label = etree.SubElement(xml_obj, 'name'); label.text = 'row separator'
-    for col_bbox in col_bboxes_narrow:        # object = extractedTable['objects'][0]
-        xml_obj = etree.SubElement(separatorXml, 'object')
-        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
-        for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
-            _ = etree.SubElement(xml_bbox, edge)
-            _.text = str(col_bbox[edge])
-        label = etree.SubElement(xml_obj, 'name'); label.text = 'column separator'
-
-    tree = etree.ElementTree(separatorXml)
-    tree.write(pathLabels_separators_narrow / labelFileEntry.name, pretty_print=True, xml_declaration=False, encoding="utf-8") 
+    if 'narrow' not in faultyAnnotation:
+        separatorXml = etree.Element('annotation')
+        xml_size = etree.SubElement(separatorXml, 'size')
+        xml_width = etree.SubElement(xml_size, 'width'); xml_width.text = str(img.shape[1])
+        xml_height = etree.SubElement(xml_size, 'height'); xml_height.text = str(img.shape[0])
+        writeBboxToXml(bboxes=row_bboxes_narrow, xmlRoot=separatorXml, label='row separator')
+        writeBboxToXml(bboxes=col_bboxes_narrow, xmlRoot=separatorXml, label='column separator')
+        writeBboxToXml(bboxes=spanInteriors_narrow, xmlRoot=separatorXml, label='spanning cell interior')
+        tree = etree.ElementTree(separatorXml)
+        tree.write(pathLabels_separators_narrow / labelFileEntry.name, pretty_print=True, xml_declaration=False, encoding="utf-8") 
 
     # XML | Write separator annotation | Wide
-    separatorXml = etree.Element('annotation')
-    for row_bbox in row_bboxes_wide:        # object = extractedTable['objects'][0]
-        xml_obj = etree.SubElement(separatorXml, 'object')
-        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
-        for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
-            _ = etree.SubElement(xml_bbox, edge)
-            _.text = str(row_bbox[edge])
-        label = etree.SubElement(xml_obj, 'name'); label.text = 'row separator'
-    for col_bbox in col_bboxes_wide:        # object = extractedTable['objects'][0]
-        xml_obj = etree.SubElement(separatorXml, 'object')
-        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
-        for edge in ['xmin', 'ymin', 'xmax', 'ymax']:
-            _ = etree.SubElement(xml_bbox, edge)
-            _.text = str(col_bbox[edge])
-        label = etree.SubElement(xml_obj, 'name'); label.text = 'column separator'
-
-    tree = etree.ElementTree(separatorXml)
-    tree.write(pathLabels_separators_wide / labelFileEntry.name, pretty_print=True, xml_declaration=False, encoding="utf-8") 
+    if 'wide' not in faultyAnnotation:
+        separatorXml = etree.Element('annotation')
+        xml_size = etree.SubElement(separatorXml, 'size')
+        xml_width = etree.SubElement(xml_size, 'width'); xml_width.text = str(img.shape[1])
+        xml_height = etree.SubElement(xml_size, 'height'); xml_height.text = str(img.shape[0])
+        writeBboxToXml(bboxes=row_bboxes_wide, xmlRoot=separatorXml, label='row separator')
+        writeBboxToXml(bboxes=col_bboxes_wide, xmlRoot=separatorXml, label='column separator')
+        writeBboxToXml(bboxes=spanInteriors_wide, xmlRoot=separatorXml, label='spanning cell interior')
+        tree = etree.ElementTree(separatorXml)
+        tree.write(pathLabels_separators_wide / labelFileEntry.name, pretty_print=True, xml_declaration=False, encoding="utf-8") 
 
 # Plot
-tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_narrow, path_output=PATH_DATA / 'images_annotated' / 'narrow', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False, 'as_area': True})
-tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_wide, path_output=PATH_DATA / 'images_annotated' / 'wide', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False, 'as_area': True})
+tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_narrow, path_output=PATH_DATA / 'images_annotated' / 'narrow', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator', 'spanning cell interior'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False, 'as_area': True})
+tabledetect.utils.visualise_annotation(path_images=PATH_IN / PROJECT / 'selected', path_labels=pathLabels_separators_wide, path_output=PATH_DATA / 'images_annotated' / 'wide', annotation_type=None, annotation_format={'labelFormat': 'voc', 'labels': ['row separator', 'column separator', 'spanning cell interior'], 'classMap': None, 'split_annotation_types': False, 'show_labels': False, 'as_area': True})
+
+# Convert to YOLO
+def voc_to_yolo(vocPath, outPath, classMap:str):
+    filePaths = [entry.path for entry in os.scandir(vocPath)]
+    outPath = Path(outPath)
+
+    for filePath in tqdm(filePaths, desc='Converting voc to yolo'):      # filePath = filePaths[0]
+        bboxes = []
+        root = etree.parse(filePath).getroot()
+        width = int(root.find(".//width").text); height = int(root.find(".//height").text)
+
+        for obj in root.findall('object'):          # obj = root.findall('object')[0]
+            label = obj.find('name').text
+            labelIndex = classMap[label]
+            bbox = {el.tag: int(el.text) for el in obj.find('bndbox').getchildren()}
+        
+            x_center = (bbox['xmin'] + bbox['xmax']) / 2 / width
+            box_width = (bbox['xmax'] - bbox['xmin']) / width
+            y_center = (bbox['ymin'] + bbox['ymax']) / 2 / height
+            box_height = (bbox['ymax'] - bbox['ymin']) / height
+            bboxes.append(f'{labelIndex} {x_center} {y_center} {box_width} {box_height}')
+
+        yoloName = os.path.splitext(os.path.basename(filePath))[0] + '.txt'
+        with open(outPath / yoloName, 'w') as outFile:
+            outFile.write('\n'.join(bboxes))
+
+    with open(outPath.parent / 'yolo_classes.json', 'w') as f:
+        json.dump(classMap, f, indent=1)
+
+CLASS_MAP = {'row separator': 0, 'column separator': 1, 'spanning cell interior': 2}
+voc_to_yolo(pathLabels_separators_wide, outPath=pathLabels_yolo, classMap=CLASS_MAP)
