@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from typing import Literal
 from datetime import datetime
 import json
+import pandas as pd
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -22,8 +23,9 @@ PATH_IN = Path(r"F:\ml-parsing-project\data")
 PROJECT = "parse_activelearning1_jpg"
 
 IMAGE_FORMAT = '.jpg'
-THRESHOLDS_ROWS = {'expansion': 50, 'pattern': 3, 'whites': 3}
-THRESHOLDS_COLUMNS = {'expansion': 50, 'pattern': 1, 'whites': 1}
+THRESHOLDS_ROWS = {'expansion': 50, 'pattern': 2.5, 'whites': 2.5}
+THRESHOLDS_COLUMNS = {'expansion': 50, 'pattern': 0.5, 'whites': 0.5}
+THRESHOLDS_SPAN_OVERFLOW_PIXEL = {'row': 8, 'column': 6}
 
 # Path things
 pathLabels = PATH_IN / PROJECT / 'labels'
@@ -123,7 +125,49 @@ def constrainToShape(bbox, shape):
     constrainedBbox['ymax'] = min(shape[0], bbox['ymax'])
     return constrainedBbox
 
-def isCellSeparatorEdge(separatorBbox, cellBbox, orientation:Literal['row', 'column']) -> False:
+def findClosestSeparators(rowSeparatorBboxes, colSeparatorBboxes, cellBbox):
+    def findByOrientation(separatorBboxes, orientation:Literal['row', 'column']):
+        minCoord = 'ymin' if orientation == 'row' else 'xmin'
+        maxCoord = 'ymax' if orientation == 'row' else 'xmax'
+        
+        # First edge
+        minCoord_value = cellBbox[minCoord]
+        smallestValue = min([separatorBbox[minCoord] for separatorBbox in separatorBboxes])
+
+        if minCoord_value <= smallestValue - THRESHOLDS_SPAN_OVERFLOW_PIXEL[orientation]:
+            minCoord_new = minCoord_value
+        else:
+            borderDistances = [abs(separatorBbox[minCoord]-minCoord_value) for separatorBbox in separatorBboxes]
+            closestSeparator = separatorBboxes[borderDistances.index(min(borderDistances))]
+            if closestSeparator[minCoord] >= minCoord_value:
+                minCoord_new = closestSeparator[minCoord] + 1
+            else:
+                minCoord_new = minCoord_value
+
+        # Last edge
+        maxCoord_value = cellBbox[maxCoord]
+        largestValue = max([separatorBbox[maxCoord] for separatorBbox in separatorBboxes])
+
+        if maxCoord_value >= largestValue + THRESHOLDS_SPAN_OVERFLOW_PIXEL[orientation]:
+            maxCoord_new = maxCoord_value
+        else:
+            borderDistances = [abs(separatorBbox[maxCoord]-maxCoord_value) for separatorBbox in separatorBboxes]
+            closestSeparator = separatorBboxes[borderDistances.index(min(borderDistances))]
+            if closestSeparator[maxCoord] <= maxCoord_value:
+                maxCoord_new = closestSeparator[maxCoord] - 1
+            else:
+                maxCoord_new = maxCoord_value
+        
+        return {minCoord: minCoord_new, maxCoord: maxCoord_new}
+    rowCoords_new = findByOrientation(separatorBboxes=rowSeparatorBboxes, orientation='row')
+    colCoords_new = findByOrientation(separatorBboxes=colSeparatorBboxes, orientation='column')
+    cellBbox_new = colCoords_new | rowCoords_new
+
+    return cellBbox_new
+
+
+
+def isCellSeparatorEdge(separatorBbox, cellBbox, orientation:Literal['row', 'column']) -> bool:
     minCoord = 'ymin' if orientation == 'row' else 'xmin'
     maxCoord = 'ymax' if orientation == 'row' else 'xmax'
 
@@ -218,6 +262,8 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
         row_whites = np.asarray([np.mean(row)*100 for row in img01])
 
         row_bboxes_wide = [widenBbox(bbox=rowbbox, minCoord='ymin', maxCoord='ymax', shapeIndex=0, patterns=row_patterns, whites=row_whites, thresholds=THRESHOLDS_ROWS) for rowbbox in row_bboxes_narrow]
+        if not len(row_bboxes_wide) == len([dict(t) for t in {tuple(d.items()) for d in row_bboxes_wide}]):
+            faultyAnnotation.append('wide')     # duplicate bboxes
         
         # XML | Columns
         # XML | Columns | Get separation location
@@ -234,6 +280,8 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
         col_whites = np.asarray([np.mean(img01[:, colIndex])*100 for colIndex in range(img01.shape[1])])
 
         col_bboxes_wide = [widenBbox(bbox=colbbox, minCoord='xmin', maxCoord='xmax', shapeIndex=1, patterns=col_patterns, whites=col_whites, thresholds=THRESHOLDS_COLUMNS) for colbbox in col_bboxes_narrow]
+        if not len(col_bboxes_wide) == len([dict(t) for t in {tuple(d.items()) for d in col_bboxes_wide}]):
+            faultyAnnotation.append('wide')     # duplicate bboxes
 
 
         # XML | Spanning cells
@@ -241,6 +289,9 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
         spans = [spanElement.find('.//bndbox') for spanElement in spanners]
         spans = map(lambda el: {child.tag: float(child.text) for child in el.getchildren()}, spans)
         spans = list(map(lambda edges: {key: floor(value) if 'min' in key else ceil(value) for key, value in edges.items()}, spans))
+
+        # XML | Spanning cells | Align to closest separators (remove overflox from labeling inaccuracies)
+        spans = [findClosestSeparators(rowSeparatorBboxes=row_bboxes_narrow, colSeparatorBboxes=col_bboxes_narrow, cellBbox=span) for span in spans]        # span = spans[0]
 
         # XML | Convert to interior (remove borders)
         spanInteriors_narrow = []
@@ -292,6 +343,13 @@ for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
         tree.write(pathLabels_separators_narrow / labelFileEntry.name, pretty_print=True, xml_declaration=False, encoding="utf-8") 
 
     # XML | Write separator annotation | Wide
+    # # XML | Write separator annotation | Wide | Check for duplicates
+    # df = pd.DataFrame.from_records(row_bboxes_wide + col_bboxes_wide + spanInteriors_wide)
+    # if df.duplicated().sum():
+    #     df = df.sort_values(by=df.columns.tolist())
+    #     df.to_csv('temp.csv')
+    #     raise Exception('duplicates spotted')
+
     if 'wide' not in faultyAnnotation:
         separatorXml = etree.Element('annotation')
         xml_size = etree.SubElement(separatorXml, 'size')
