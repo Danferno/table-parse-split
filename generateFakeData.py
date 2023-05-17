@@ -5,10 +5,9 @@ from lxml import etree
 from math import floor, ceil
 from copy import deepcopy
 from tqdm import tqdm
-import tabledetect
-import shutil
 import numpy as np
 import cv2 as cv
+import shutil
 import matplotlib.pyplot as plt
 from typing import Literal
 from datetime import datetime
@@ -24,12 +23,30 @@ IMAGE_FORMAT = '.jpg'
 COMPLEXITY = 1
 
 # Path stuff
-pathOut = PATH_DATA / f'fake_{COMPLEXITY}'
+pathOut = PATH_DATA / f'fake_{COMPLEXITY}' / 'all'
 pathOut_images = pathOut / 'images'
 pathOut_labels = pathOut / 'labels'
-os.makedirs(pathOut, exist_ok=True)
-os.makedirs(pathOut_images, exist_ok=True)
-os.makedirs(pathOut_labels, exist_ok=True)
+pathOut_features = pathOut / 'features'
+
+# Classes and helper functions
+def replaceDirs(path):
+    try:
+        os.makedirs(path)
+    except FileExistsError:
+        shutil.rmtree(path)
+        os.makedirs(path)
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+    
+# Make folders
+replaceDirs(pathOut)
+replaceDirs(pathOut_images)
+replaceDirs(pathOut_labels)
+replaceDirs(pathOut_features)
 
 # Generate fake data
 def generateSeparatorBlock(blockSize, separator_size, separator_location, separator_include, otherSize, complexity=COMPLEXITY):
@@ -71,28 +88,50 @@ def generateImage(complexity=COMPLEXITY):
     # Combine | Image
     img = img_base + rowContribution
     img[img != 0] = 1
+    img = img.astype('float32')
 
     # Combine | Ground Truth
-    gt = {'row': row_separator_gt.tolist()}
+    gt = {}
+    gt['row'] = row_separator_gt
 
     # Extract features
+    features = {}
+    features['row_avg'] = np.asarray([np.absolute(np.diff(row)).mean()*100 for row in img])
+    features['row_whites'] = np.asarray([np.mean(row)*100 for row in img])
     
-
-    # Show
-    # test = img*255
-    # cv.imshow("image", test)
-    # cv.waitKey(0)
-
     # Save
     name = str(uuid4())
     cv.imwrite(filename=str(pathOut_images / f'{name}.jpg'), img=img*255)
 
     with open(pathOut_labels / f'{name}.json', 'w') as groundTruthFile:
-        json.dump(gt, groundTruthFile)
+        json.dump(gt, groundTruthFile, cls=NumpyEncoder)
+    with open(pathOut_features / f'{name}.json', 'w') as featureFile:
+        json.dump(features, featureFile, cls=NumpyEncoder)
+
+    # Show
+    # test = img*255
+    # cv.imshow("image", test)
+    # cv.waitKey(0)
     
+for i in tqdm(range(80), desc=f"Generating fake images of complexity {COMPLEXITY}"):
+    generateImage()
 
 
+# Split into train/val/test
+def splitData(pathIn=pathOut, trainRatio=0.8, valRatio=0.1):
+    items = [os.path.splitext(entry.name)[0] for entry in os.scandir(pathIn / 'images')]
+    random.shuffle(items)
 
+    dataSplit = {}
+    dataSplit['train'], dataSplit['val'], dataSplit['test'] = np.split(items, indices_or_sections=[int(len(items)*trainRatio), int(len(items)*(trainRatio+valRatio))])
 
+    for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
+        destPath = pathIn.parent / subgroup
+        os.makedirs(destPath / 'images'); os.makedirs(destPath / 'labels'); os.makedirs(destPath / 'features')
 
-    
+        for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
+            _ = shutil.copyfile(src=pathIn / 'images'   / f'{item}.jpg',  dst=destPath / 'images' / f'{item}.jpg')
+            _ = shutil.copyfile(src=pathIn / 'labels'   / f'{item}.json', dst=destPath / 'labels' / f'{item}.json')
+            _ = shutil.copyfile(src=pathIn / 'features' / f'{item}.json', dst=destPath / 'features' / f'{item}.json')
+
+splitData()
