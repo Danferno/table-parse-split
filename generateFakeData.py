@@ -23,10 +23,8 @@ IMAGE_FORMAT = '.jpg'
 COMPLEXITY = 1
 
 # Path stuff
-pathOut = PATH_DATA / f'fake_{COMPLEXITY}' / 'all'
-pathOut_images = pathOut / 'images'
-pathOut_labels = pathOut / 'labels'
-pathOut_features = pathOut / 'features'
+pathOut = PATH_DATA / f'fake_{COMPLEXITY}'
+pathAll = pathOut / 'all'
 
 # Classes and helper functions
 def replaceDirs(path):
@@ -44,9 +42,10 @@ class NumpyEncoder(json.JSONEncoder):
     
 # Make folders
 replaceDirs(pathOut)
-replaceDirs(pathOut_images)
-replaceDirs(pathOut_labels)
-replaceDirs(pathOut_features)
+replaceDirs(pathAll)
+replaceDirs(pathAll / 'images')
+replaceDirs(pathAll / 'labels')
+replaceDirs(pathAll / 'features')
 
 # Generate fake data
 def generateSeparatorBlock(blockSize, separator_size, separator_location, separator_include, otherSize, complexity=COMPLEXITY):
@@ -59,7 +58,7 @@ def generateSeparatorBlock(blockSize, separator_size, separator_location, separa
     
     return block
 
-def generateImage(complexity=COMPLEXITY):
+def generateSample(complexity=COMPLEXITY):
     '''Complexity:
         1: Square B/W image with thick, uniform rows '''
     
@@ -96,16 +95,16 @@ def generateImage(complexity=COMPLEXITY):
 
     # Extract features
     features = {}
-    features['row_avg'] = np.asarray([np.absolute(np.diff(row)).mean()*100 for row in img])
-    features['row_whites'] = np.asarray([np.mean(row)*100 for row in img])
+    features['row_absDiff'] = np.asarray([np.absolute(np.diff(row)).mean() for row in img])
+    features['row_avg'] = np.asarray([np.mean(row) for row in img])
     
     # Save
     name = str(uuid4())
-    cv.imwrite(filename=str(pathOut_images / f'{name}.jpg'), img=img*255)
+    cv.imwrite(filename=str(pathAll /'images' / f'{name}.jpg'), img=img*255)
 
-    with open(pathOut_labels / f'{name}.json', 'w') as groundTruthFile:
+    with open(pathAll / 'labels' / f'{name}.json', 'w') as groundTruthFile:
         json.dump(gt, groundTruthFile, cls=NumpyEncoder)
-    with open(pathOut_features / f'{name}.json', 'w') as featureFile:
+    with open(pathAll / 'features' / f'{name}.json', 'w') as featureFile:
         json.dump(features, featureFile, cls=NumpyEncoder)
 
     # Show
@@ -114,11 +113,11 @@ def generateImage(complexity=COMPLEXITY):
     # cv.waitKey(0)
     
 for i in tqdm(range(80), desc=f"Generating fake images of complexity {COMPLEXITY}"):
-    generateImage()
+    generateSample()
 
 
 # Split into train/val/test
-def splitData(pathIn=pathOut, trainRatio=0.8, valRatio=0.1):
+def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1):
     items = [os.path.splitext(entry.name)[0] for entry in os.scandir(pathIn / 'images')]
     random.shuffle(items)
 
