@@ -8,6 +8,7 @@ from torchvision.io import read_image, ImageReadMode
 from torch.utils.data import Dataset, DataLoader
 from torch import ByteTensor, Tensor, as_tensor
 import cv2 as cv
+import numpy as np
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -16,6 +17,7 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Paths
 pathData = PATH_ROOT / 'data' / f'fake_{COMPLEXITY}'
+os.makedirs(pathData / 'val_annotated', exist_ok=True)
 
 # Data
 class TableDataset(Dataset):
@@ -119,24 +121,42 @@ class TabliterModel(nn.Module):
         return logits
 
 model = TabliterModel()
-print(model)
 logits = model(sample)
 
 # Loss function
-class RowLoss(nn.Module):
-    def __init__(self):
-        super(RowLoss, self).__init__()
-        self.loss_fn = nn.BCELoss()
-    def forward(self, logits, targets):
-        loss = self.loss_fn(logits, targets)
-        return loss
+# Loss function | Calculate target ratio to avoid dominant focus
+targets = [(sample['label']['row'].sum().item(), sample['label']['row'].shape[0]) for sample in iter(dataset_train)]
+ones = sum([sample[0] for sample in targets])
+total = sum([sample[1] for sample in targets])
+
+shareOnes = ones / total
+shareZeros = 1-shareOnes
+classWeights = Tensor([1.0/shareZeros, 1.0/shareOnes])
+classWeights = classWeights / classWeights.sum()
+
+# Loss function | Define weighted loss function
+class WeightedBinaryCrossEntropyLoss(nn.Module):
+    def __init__(self, weights=[]):
+        super(WeightedBinaryCrossEntropyLoss, self).__init__()
+        self.weights = weights
+    def forward(self, input, target):
+        input_clamped = torch.clamp(input, min=1e-8, max=1-1e-8)
+        if self.weights is not None:
+            assert len(self.weights) == 2
+            loss =  self.weights[0] * ((1-target) * torch.log(1- input_clamped)) + \
+                    self.weights[1] *  (target    * torch.log(input_clamped)) 
+        else:
+            loss = (1-target) * torch.log(1 - input_clamped) + \
+                    target    * torch.log(input_clamped)
+
+        return torch.neg(torch.mean(loss))
 
 
 # Train
-lr = 1e-2
+lr = 1e-1
 batch_size = 1
-epochs = 40
-loss_fn = RowLoss()
+epochs = 20
+loss_fn = WeightedBinaryCrossEntropyLoss(weights=classWeights)
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
 def train_loop(dataloader, model, loss_fn, optimizer):
@@ -189,12 +209,13 @@ for t in range(epochs):
     val_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn)
 
 
-# Evaluation
+# Predict
 def eval_loop(dataloader, model, loss_fn):
     sampleCount = len(dataloader.dataset)
     batchCount = len(dataloader)
     eval_loss, correct = 0,0
     predictions = []
+    targets = []
     with torch.no_grad():
         for batch in dataloader:
             sample = batch
@@ -205,23 +226,32 @@ def eval_loop(dataloader, model, loss_fn):
             eval_loss += loss_fn(preds_row, targets_row).item()
             correct += ((preds_row >= 0.5) == targets_row).sum().item()
             predictions.append(preds_row)
+            targets.append(targets_row)
 
     rows_per_image = targets_row.shape[-1]
     eval_loss = eval_loss / batchCount
     correct = correct / (sampleCount * rows_per_image)
 
-    print(f'''Evaluation
+    print(f'''Evaluation (normally on val)
         Accuracy: {(100*correct):>0.1f}%
         Avg val loss: {eval_loss:>8f}''')
-    return predictions
+    return predictions, targets
     
-predictions = eval_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn)
-
+predictions, targets = eval_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn)
 
 # Visualise
-prediction = predictions[0][0]
-img = prediction.repeat(300, 1).view(600,300) * 255
-cv.imshow("img", img.numpy()); cv.waitKey(0)
+def visualize(prediction, target, i, outPath):
+    rowPrediction = prediction.squeeze() > 0.5
+    rowTarget = target.squeeze()
 
+    prediction = rowPrediction.unsqueeze(1).repeat(1, 300) * 255
+    target = rowTarget.unsqueeze(1).repeat(1, 50) * 128
 
-print('Finished training')
+    img = torch.cat([prediction, target], dim=1).numpy().astype(np.uint8)
+    # cv.imshow("img", img); cv.waitKey(0)
+    cv.imwrite(str(outPath / f'img_{i}.jpg'), img)
+
+for i in range(len(predictions)):
+    visualize(prediction=predictions[i], target=targets[i], i=i, outPath=pathData / 'val_annotated')
+
+print('End')
