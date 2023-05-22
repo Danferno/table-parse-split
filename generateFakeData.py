@@ -20,8 +20,9 @@ from uuid import uuid4
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA = PATH_ROOT / 'data'
 IMAGE_FORMAT = '.jpg'
+
 COMPLEXITY = ['avg-matters']
-#COMPLEXITY = ['avg-matters', 'dash-matters']
+COMPLEXITY = ['avg-matters', 'dash-matters', 'include-cols']
 
 # Path stuff
 pathOut = PATH_DATA / f'fake_{len(COMPLEXITY)}'
@@ -81,7 +82,7 @@ def generateBlock(separatorType, contentType, sizeOptions):
     # Add separator block
     separator_block = typeToBlock(blockType=separatorType, sizeOptions=sizeOptions)
     if separator_block is not None:
-        separator_startRow = sizeOptions['separator_location']
+        separator_startRow = sizeOptions['separator_start']
         separator_endRow = separator_startRow + separator_block.shape[0]
         block[separator_startRow:separator_endRow] = separator_block
     
@@ -94,7 +95,7 @@ def generateGroundTruth(separatorType, sizeOptions):
     dimFull = sizeOptions['block_size']
     dimSeparator = sizeOptions['separator_size']
 
-    separator_start = sizeOptions['separator_location']
+    separator_start = sizeOptions['separator_start']
     separator_end = separator_start + dimSeparator
 
     groundTruth = np.zeros(shape=(dimFull))
@@ -111,17 +112,27 @@ def generateSample(complexity=COMPLEXITY):
     row_blockCount = 10
     col_blockCount = 10
     size_rowBlock = 60
-    size_colBlock = 40
+    size_colBlock = 50
     img_shape = (row_blockCount * size_rowBlock, col_blockCount * size_colBlock)
     
     separator_row_size = size_rowBlock // 4
     separator_row_location = (size_rowBlock - separator_row_size) // 2
 
-    row_size_options = {
+    separator_col_size = size_colBlock // 7
+    separator_col_location = ((size_colBlock // separator_col_size) - 2) * separator_col_size
+
+    row_sizeOptions = {
         'block_size': size_rowBlock,
         'otherDim_size': size_colBlock*col_blockCount,
         'separator_size': separator_row_size,
-        'separator_location': separator_row_location,
+        'separator_start': separator_row_location,
+    }
+
+    col_sizeOptions = {
+        'block_size': size_colBlock,
+        'otherDim_size': size_rowBlock*row_blockCount,
+        'separator_size': separator_col_size,
+        'separator_start': separator_col_location,
     }
 
     # Base image
@@ -141,25 +152,44 @@ def generateSample(complexity=COMPLEXITY):
     # Rows | Generate visual
     row_separatorTypes = np.random.choice(classes_separators, size=row_blockCount, replace=True)
     row_contentTypes = np.random.choice(classes_content, size=row_blockCount, replace=True)
-    rowBlocks = [generateBlock(separatorType=row_separatorTypes[i], contentType=row_contentTypes[i], sizeOptions=row_size_options) for i in range(row_blockCount)]        # i = 1
+    rowBlocks = [generateBlock(separatorType=row_separatorTypes[i], contentType=row_contentTypes[i], sizeOptions=row_sizeOptions) for i in range(row_blockCount)]        # i = 1
     rowContribution = np.concatenate(rowBlocks)
 
     # Rows | Get separator features
-    row_separator_gt = np.concatenate([generateGroundTruth(separatorType=row_separatorTypes[i], sizeOptions=row_size_options) for i in range(row_blockCount)])
+    row_separator_gt = np.concatenate([generateGroundTruth(separatorType=row_separatorTypes[i], sizeOptions=row_sizeOptions) for i in range(row_blockCount)])
+
+    # Cols
+    if 'include-cols' in COMPLEXITY:   
+        # Cols | Generate visual
+        col_separatorTypes = np.random.choice(classes_separators, size=col_blockCount, replace=True)
+        col_contentTypes = np.random.choice(classes_content, size=col_blockCount, replace=True)
+        colBlocks = [generateBlock(separatorType=col_separatorTypes[i], contentType=col_contentTypes[i], sizeOptions=col_sizeOptions) for i in range(col_blockCount)]        # i = 1
+        colContribution = np.concatenate(colBlocks).T
+
+        # Cols | Get separator features
+        col_separator_gt = np.concatenate([generateGroundTruth(separatorType=col_separatorTypes[i], sizeOptions=col_sizeOptions) for i in range(col_blockCount)])
+    else:
+        colContribution = np.zeros_like(rowContribution)
+        col_separator_gt = np.zeros(shape=(img_shape[1],))
 
     # Combine
     # Combine | Image
     img = img_base + rowContribution
+    img = np.maximum(img, colContribution)
     img = np.clip(img, a_min=0, a_max=1)
 
     # Combine | Ground Truth
     gt = {}
     gt['row'] = row_separator_gt
+    gt['col'] = col_separator_gt
 
     # Extract features
     features = {}
     features['row_absDiff'] = np.asarray([np.absolute(np.diff(row)).mean() for row in img])
     features['row_avg'] = np.asarray([np.mean(row) for row in img])
+    
+    features['col_absDiff'] =   np.asarray([np.absolute(np.diff(col)).mean() for col in img.T])
+    features['col_avg'] = np.asarray([np.mean(col) for col in img.T])
     
     # Save
     name = str(uuid4())
