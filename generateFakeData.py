@@ -142,8 +142,8 @@ def generateSample(complexity=COMPLEXITY):
     classes_separators = [Block(purpose='no-separator', color_average=None, pattern=None)]
     classes_content = []
     if 'avg-matters' in complexity:
-        classes_separators.append(Block(purpose='separator', color_average=1, pattern='uniform'))
-        classes_content.append(Block(purpose='content', color_average=0, pattern='uniform'))
+        classes_separators.append(Block(purpose='separator', color_average=0, pattern='uniform'))
+        classes_content.append(Block(purpose='content', color_average=1, pattern='uniform'))
     if 'dash-matters' in complexity:
         classes_separators.append(Block(purpose='separator', color_average=0.5, pattern='dash50'))
         classes_content.append(Block(purpose='content', color_average=0.5, pattern='uniform'))
@@ -175,7 +175,7 @@ def generateSample(complexity=COMPLEXITY):
     # Combine
     # Combine | Image
     img = img_base + rowContribution
-    img = np.maximum(img, colContribution)
+    img = np.minimum(img, colContribution)
     img = np.clip(img, a_min=0, a_max=1)
 
     # Combine | Ground Truth
