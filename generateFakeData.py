@@ -20,10 +20,10 @@ from uuid import uuid4
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA = PATH_ROOT / 'data'
 IMAGE_FORMAT = '.jpg'
-COMPLEXITY = 1
+COMPLEXITY = ['avg-matters', 'dash-matters']
 
 # Path stuff
-pathOut = PATH_DATA / f'fake_{COMPLEXITY}'
+pathOut = PATH_DATA / f'fake_{len(COMPLEXITY)}'
 pathAll = pathOut / 'all'
 
 # Classes and helper functions
@@ -40,6 +40,14 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
     
+class Block(dict):
+    def __init__(self, purpose, color_average, pattern):
+        self.purpose = purpose
+        self.color_average = color_average if color_average is not None else None
+        self.pattern = pattern
+    def __repr__(self) -> str:
+        return f"({self.purpose[:7]}, color {self.color_average}, {self.pattern})"
+    
 # Make folders
 replaceDirs(pathOut)
 replaceDirs(pathAll)
@@ -47,47 +55,101 @@ replaceDirs(pathAll / 'images')
 replaceDirs(pathAll / 'labels')
 replaceDirs(pathAll / 'features')
 
-# Generate fake data
-def generateSeparatorBlock(blockSize, separator_size, separator_location, separator_include, otherSize, complexity=COMPLEXITY):
-    # Base block
-    block = np.zeros((blockSize, otherSize), dtype=np.uint8)
-    
-    # Add separator
-    if separator_include:
-        block[separator_location:separator_location+separator_size, :] = 1
-    
+# Block generators
+def typeToBlock(blockType, sizeOptions):
+    dim1 = sizeOptions['separator_size'] if blockType.purpose == 'separator' else sizeOptions['block_size']
+    dim2 = sizeOptions['otherDim_size']
+
+    if blockType.purpose == 'no-separator':
+        return None
+
+    if blockType.pattern == 'uniform':
+        block = np.full(fill_value=blockType.color_average, shape=(dim1, dim2), dtype=np.float32)
+    elif blockType.pattern == 'dash50':
+        block_dim1 = np.tile(A=[0, 1], reps=dim2 // 2).astype(np.float32)
+        block = np.broadcast_to(block_dim1, shape=(dim1, dim2))
+    else:
+        raise ValueError(f'{blockType.pattern} pattern not supported')    
+
     return block
 
+def generateBlock(separatorType, contentType, sizeOptions):
+    # Content block
+    block = typeToBlock(blockType=contentType, sizeOptions=sizeOptions)
+    
+    # Add separator block
+    separator_block = typeToBlock(blockType=separatorType, sizeOptions=sizeOptions)
+    if separator_block is not None:
+        separator_startRow = sizeOptions['separator_location']
+        separator_endRow = separator_startRow + separator_block.shape[0]
+        block[separator_startRow:separator_endRow] = separator_block
+    
+    # for idx, row in enumerate(block):
+    #     print(idx, ': ', row)
+
+    return block
+
+def generateGroundTruth(separatorType, sizeOptions):
+    dimFull = sizeOptions['block_size']
+    dimSeparator = sizeOptions['separator_size']
+
+    separator_start = sizeOptions['separator_location']
+    separator_end = separator_start + dimSeparator
+
+    groundTruth = np.zeros(shape=(dimFull))
+    if separatorType.purpose == 'separator':
+        groundTruth[separator_start:separator_end] = 1
+
+    return groundTruth
+
+# Generate fake data
 def generateSample(complexity=COMPLEXITY):
     '''Complexity:
         1: Square B/W image with thick, uniform rows '''
-    
     # Shapes
-    img_blockCount = (10, 10)
-    shape_rowBlock = 60
-    shape_colBlock = 40
-    img_shape = (img_blockCount[0] * shape_rowBlock, img_blockCount[1] * shape_colBlock)
-    shape_row = 15
-    separatorLocation_row = floor((shape_rowBlock-shape_row) * 0.5)
+    row_blockCount = 10
+    col_blockCount = 10
+    size_rowBlock = 60
+    size_colBlock = 40
+    img_shape = (row_blockCount * size_rowBlock, col_blockCount * size_colBlock)
+    
+    separator_row_size = size_rowBlock // 4
+    separator_row_location = (size_rowBlock - separator_row_size) // 2
+
+    row_size_options = {
+        'block_size': size_rowBlock,
+        'otherDim_size': size_colBlock*col_blockCount,
+        'separator_size': separator_row_size,
+        'separator_location': separator_row_location,
+    }
 
     # Base image
-    img_base = np.zeros(shape=img_shape, dtype=np.uint8)
+    img_base = np.zeros(shape=img_shape, dtype=np.float32)
+    
+    # Block classes
+    classes_separators = [Block(purpose='no-separator', color_average=None, pattern=None)]
+    classes_content = []
+    if 'avg-matters' in complexity:
+        classes_separators.append(Block(purpose='separator', color_average=1, pattern='uniform'))
+        classes_content.append(Block(purpose='content', color_average=0, pattern='uniform'))
+    if 'dash-matters' in complexity:
+        classes_separators.append(Block(purpose='separator', color_average=0.5, pattern='dash50'))
+        classes_content.append(Block(purpose='content', color_average=0.5, pattern='uniform'))
 
     # Rows
     # Rows | Generate visual
-    rowBlock_count = floor(img_shape[0]/shape_rowBlock)
-    rowBlock_includeSeparatorList = np.random.randint(2, size=rowBlock_count)
-    rowBlocks = [generateSeparatorBlock(blockSize=shape_rowBlock, separator_size=shape_row, separator_location=separatorLocation_row, separator_include=includeSeparator, otherSize=img_shape[1]) for includeSeparator in rowBlock_includeSeparatorList]
+    row_separatorTypes = np.random.choice(classes_separators, size=row_blockCount, replace=True)
+    row_contentTypes = np.random.choice(classes_content, size=row_blockCount, replace=True)
+    rowBlocks = [generateBlock(separatorType=row_separatorTypes[i], contentType=row_contentTypes[i], sizeOptions=row_size_options) for i in range(row_blockCount)]        # i = 1
     rowContribution = np.concatenate(rowBlocks)
 
     # Rows | Get separator features
-    row_separator_gt = rowContribution.max(axis=1)
+    row_separator_gt = np.concatenate([generateGroundTruth(separatorType=row_separatorTypes[i], sizeOptions=row_size_options) for i in range(row_blockCount)])
 
     # Combine
     # Combine | Image
     img = img_base + rowContribution
-    img[img != 0] = 1
-    img = img.astype('float32')
+    img = np.clip(img, a_min=0, a_max=1)
 
     # Combine | Ground Truth
     gt = {}
@@ -106,13 +168,8 @@ def generateSample(complexity=COMPLEXITY):
         json.dump(gt, groundTruthFile, cls=NumpyEncoder)
     with open(pathAll / 'features' / f'{name}.json', 'w') as featureFile:
         json.dump(features, featureFile, cls=NumpyEncoder)
-
-    # Show
-    # test = img*255
-    # cv.imshow("image", test)
-    # cv.waitKey(0)
     
-for i in tqdm(range(80), desc=f"Generating fake images of complexity {COMPLEXITY}"):
+for i in tqdm(range(120), desc=f"Generating fake images of complexity {COMPLEXITY}"):
     generateSample()
 
 
