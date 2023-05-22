@@ -9,15 +9,20 @@ from torch.utils.data import Dataset, DataLoader
 from torch import ByteTensor, Tensor, as_tensor
 import cv2 as cv
 import numpy as np
+import string
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-COMPLEXITY = 2
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+COMPLEXITY = 3
 BATCH_SIZE = 2
+LOSS_TYPES = ['row', 'col']
+TARGET_MAX_LUMINOSITY = 60
+PREDS_MAX_LUMINOSITY = TARGET_MAX_LUMINOSITY * 2
+EMPTY_LUMINOSITY = 0
 
-TARGET_MAX_LUMINOSITY = 240
-PREDS_MAX_LUMINOSITY = 200
+# Derived constants
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+LOSS_TYPES_COUNT = len(LOSS_TYPES)
 
 # Paths
 pathData = PATH_ROOT / 'data' / f'fake_{COMPLEXITY}'
@@ -73,13 +78,17 @@ class TableDataset(Dataset):
             labelData = json.load(f)
         sample['label'] = {}
         sample['label']['row'] = Tensor(labelData['row']).unsqueeze(-1)
+        sample['label']['col'] = Tensor(labelData['col']).unsqueeze(-1)
     
         # Load sample | Features
         with open(pathFeatures, 'r') as f:
             featuresData = json.load(f)
         sample['features'] = {}
-        sample['features']['row_absDiff'] = Tensor(featuresData['row_absDiff']).unsqueeze(-1)
         sample['features']['row_avg'] = Tensor(featuresData['row_avg']).unsqueeze(-1)
+        sample['features']['col_avg'] = Tensor(featuresData['col_avg']).unsqueeze(-1)
+        sample['features']['row_absDiff'] = Tensor(featuresData['row_absDiff']).unsqueeze(-1)
+        sample['features']['col_absDiff'] = Tensor(featuresData['col_absDiff']).unsqueeze(-1)
+        
 
         # Optional transform
         if self.transform:
@@ -112,38 +121,47 @@ sample = next(iter(dataloader_train))
 class TabliterModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.layer_row_avg = nn.Linear(in_features=2, out_features=1)
+        self.layer_linear = nn.Linear(in_features=2, out_features=1)
         self.layer_logit = nn.Sigmoid()
     
     def forward(self, sample):
-        # row_avg_inputs = [row.view(1,) for row in sample['features']['row_avg'].squeeze()]
-        # row_avgs = [self.layer_row_avg(row_avg_input) for row_avg_input in row_avg_inputs]
-        # intermediate_inputs = [Tensor(row_avgs[i]) for i in range(len(row_avgs))]
-        # logits = torch.cat([self.layer_logit(intermediate_input) for intermediate_input in intermediate_inputs])
-
+        # Row
         row_avg_inputs = sample['features']['row_avg']
         row_absDiff_inputs = sample['features']['row_absDiff']
         row_inputs = torch.cat([row_avg_inputs, row_absDiff_inputs], dim=-1)
-        row_avgs = self.layer_row_avg(row_inputs)
+        row_intermediate_inputs = self.layer_linear(row_inputs)
         
-        intermediate_inputs = row_avgs
-        logits = self.layer_logit(intermediate_inputs)
+        row_probs = self.layer_logit(row_intermediate_inputs)
+
+        # Col
+        col_avg_inputs = sample['features']['col_avg']
+        col_absDiff_inputs = sample['features']['col_absDiff']
+        col_inputs = torch.cat([col_avg_inputs, col_absDiff_inputs], dim=-1)
+        col_intermediate_inputs = self.layer_linear(col_inputs)
         
-        return logits
+        col_probs = self.layer_logit(col_intermediate_inputs)
+       
+        return {'row': row_probs, 'col': col_probs}
 
 model = TabliterModel()
 logits = model(sample)
 
 # Loss function
 # Loss function | Calculate target ratio to avoid dominant focus
-targets = [(sample['label']['row'].sum().item(), sample['label']['row'].shape[0]) for sample in iter(dataset_train)]
-ones = sum([sample[0] for sample in targets])
-total = sum([sample[1] for sample in targets])
+def calculateWeights(targets):    
+    ones = sum([sample[0] for sample in targets])
+    total = sum([sample[1] for sample in targets])
 
-shareOnes = ones / total
-shareZeros = 1-shareOnes
-classWeights = Tensor([1.0/shareZeros, 1.0/shareOnes])
-classWeights = classWeights / classWeights.sum()
+    shareOnes = ones / total
+    shareZeros = 1-shareOnes
+    classWeights = Tensor([1.0/shareZeros, 1.0/shareOnes])
+    classWeights = classWeights / classWeights.sum()
+    return classWeights
+
+targets_row = [(sample['label']['row'].sum().item(), sample['label']['row'].shape[0]) for sample in iter(dataset_train)]
+targets_col = [(sample['label']['col'].sum().item(), sample['label']['col'].shape[0]) for sample in iter(dataset_train)]
+classWeights = {'row': calculateWeights(targets=targets_row),
+                'col': calculateWeights(targets=targets_col)}
 
 # Loss function | Define weighted loss function
 class WeightedBinaryCrossEntropyLoss(nn.Module):
@@ -162,23 +180,42 @@ class WeightedBinaryCrossEntropyLoss(nn.Module):
 
         return torch.neg(torch.mean(loss))
 
+def calculateLoss(batch, preds, lossFunctions:dict, calculateCorrect=False):   
+    loss = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE)
+    correct, maxCorrect = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
+
+    for idx, lossType in enumerate(LOSS_TYPES):
+        target = batch['label'][lossType].to(DEVICE)
+        pred = preds[lossType].to(DEVICE)
+        loss_fn = lossFunctions[lossType]
+
+        loss[idx] = loss_fn(pred, target)
+
+        if calculateCorrect:
+            correct[idx] = ((pred >= 0.5) == target).sum().item()
+            maxCorrect[idx] = pred.numel()
+    
+    if calculateCorrect:
+        return loss, correct, maxCorrect
+    else:
+        return loss.sum()
+
 
 # Train
 lr = 1e-1
 epochs = 10
-loss_fn = WeightedBinaryCrossEntropyLoss(weights=classWeights)
+lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
+                 'col': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
-def train_loop(dataloader, model, loss_fn, optimizer, report_frequency=4):
+def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4):
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
     for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
         # Compute prediction and loss
-        batch = batch
-        targets_row = batch['label']['row'].to(DEVICE)
-        preds_row = model(batch).to(DEVICE)
-        loss = loss_fn(preds_row, targets_row)
-
+        preds = model(batch)
+        loss = calculateLoss(batch, preds, lossFunctions)
+        
         # Backpropagation
         loss.backward()
         optimizer.step()
@@ -190,84 +227,82 @@ def train_loop(dataloader, model, loss_fn, optimizer, report_frequency=4):
             loss, current = loss.item(), (batchNumber+1) * batch_size
             print(f'Loss: {loss:>7f} [{current:>5d}/{size:>5d}]')
 
-def val_loop(dataloader, model, loss_fn):
-    sampleCount = len(dataloader.dataset)
+def val_loop(dataloader, model, lossFunctions):
     batchCount = len(dataloader)
-    val_loss, correct = 0,0
+    val_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
     with torch.no_grad():
         for batch in dataloader:     # batch = next(iter(dataloader))
             # Compute prediction and loss
-            targets_row = batch['label']['row']
-            preds_row = model(batch)
+            preds = model(batch)
+            val_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch, preds, lossFunctions, calculateCorrect=True)
+            val_loss += val_loss_batch
+            correct  += correct_batch
+            maxCorrect  += maxCorrect_batch
 
-            val_loss += loss_fn(preds_row, targets_row).item()
-            correct += ((preds_row >= 0.5) == targets_row).sum().item()
-
-    rows_per_image = targets_row.shape[1]
     val_loss = val_loss / batchCount
-    correct = correct / (sampleCount * rows_per_image)
+    shareCorrect = correct / maxCorrect
 
     print(f'''Validation
-        Accuracy: {(100*correct):>0.1f}%
-        Avg val loss: {val_loss:>8f}''')
+        Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
+        Avg val loss: {val_loss.sum().item():>6f} (total) | {val_loss[0].item():>6f} (row) | {val_loss[1].item():>6f} (col)''')
 
 for t in range(epochs):
     print(f"Epoch {t+1} -------------------------------")
-    train_loop(dataloader=dataloader_train, model=model, loss_fn=loss_fn, optimizer=optimizer, report_frequency=1)
-    val_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn)
+    train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=1)
+    val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
 
 
 # Predict
 def eval_loop(dataloader, model, loss_fn, outPath=None):
     batchCount = len(dataloader)
-    eval_loss, correct, maxCorrect = 0,0,0
+    eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
     with torch.no_grad():
         for batchNumber, batch in enumerate(dataloader):
-            # Predict
-            targets_row = batch['label']['row']
-            preds_row = model(batch)
-
-            # Eval
-            eval_loss += loss_fn(preds_row, targets_row).item()
-            correct += ((preds_row >= 0.5) == targets_row).sum().item()
-            maxCorrect += preds_row.numel()
+            # Compute prediction and loss
+            preds = model(batch)
+            eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch, preds, lossFunctions, calculateCorrect=True)
+            eval_loss += eval_loss_batch
+            correct  += correct_batch
+            maxCorrect  += maxCorrect_batch
 
             # Visualise
             if outPath:
-                imagePixels = torch.flatten(batch['image'], end_dim=2)
-                row_target_pixels = torch.broadcast_to(input=torch.flatten(targets_row, end_dim=1), size=(targets_row.numel(), 40)) * TARGET_MAX_LUMINOSITY
-                row_prediction_pixels = (torch.broadcast_to(input=torch.flatten(preds_row, end_dim=1), size=(preds_row.numel(), 40)) >= 0.5)* PREDS_MAX_LUMINOSITY
+                batch_size = dataloader.batch_size
+                for sampleNumber in range(batch_size):      # sampleNumber = 0
+                    # Get sample info
+                    image = batch['image'][sampleNumber]
+                    row_targets = batch['label']['row'][sampleNumber]
+                    row_predictions = preds['row'][sampleNumber]
+                    col_targets = batch['label']['col'][sampleNumber]
+                    col_predictions = preds['col'][sampleNumber]
+                    outName = 'img_' + str(batchNumber) + string.ascii_lowercase[sampleNumber]  
 
-                rowPixels = torch.cat([row_target_pixels, row_prediction_pixels], dim=1)
+                    imagePixels = torch.flatten(image, end_dim=1)                   
+                    row_target_pixels = torch.broadcast_to(input=row_targets, size=(row_targets.numel(), 40)) * TARGET_MAX_LUMINOSITY
+                    row_prediction_pixels = (torch.broadcast_to(input=row_predictions, size=(row_predictions.numel(), 40)) >= 0.5)* PREDS_MAX_LUMINOSITY
+                    rowPixels = torch.cat([row_target_pixels, row_prediction_pixels], dim=1)
+                    img = torch.cat([imagePixels, rowPixels], dim=1)
 
-                img = torch.cat([imagePixels, rowPixels], dim=1).numpy().astype(np.uint8)
-                cv.imwrite(str(outPath / f'img_{batchNumber}.jpg'), img)
+                    col_target_pixels = torch.broadcast_to(input=col_targets, size=(col_targets.numel(), 40)).T * TARGET_MAX_LUMINOSITY
+                    col_prediction_pixels = (torch.broadcast_to(input=col_predictions, size=(col_predictions.numel(), 40)) >= 0.5).T * PREDS_MAX_LUMINOSITY
+                    colPixels = torch.cat([col_target_pixels, col_prediction_pixels], dim=0)
+                    
+                    emptyBlock = torch.full(size=(colPixels.shape[0], rowPixels.shape[1]), fill_value=EMPTY_LUMINOSITY)
+                    colPixels = torch.cat([colPixels, emptyBlock], axis=1)
+
+                    img = torch.cat([img, colPixels], dim=0).numpy().astype(np.uint8)
+                    cv.imwrite(str(outPath / f'{outName}.jpg'), img)
 
     eval_loss = eval_loss / batchCount
-    correct = correct / maxCorrect
+    shareCorrect = correct / maxCorrect
 
-    print(f'''Evaluation (normally on val)
-        Accuracy: {(100*correct):>0.1f}%
-        Avg val loss: {eval_loss:>8f}''')
+    print(f'''Validation
+        Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
+        Avg val loss: {eval_loss.sum().item():>6f} (total) | {eval_loss[0].item():>6f} (row) | {eval_loss[1].item():>6f} (col)''')
     
     if outPath:
         return outPath
-    
-eval_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn, outPath=pathData / 'val_annotated')
 
-# Visualise
-def visualize(batchedResults, outPath):
-    for batchedResult in batchedResults:
-        batchSize = batchedResult['images'].shape[0]
-        for sampleNumber in range(batchSize):
-            image = batchedResult['images'][sampleNumber].squeeze()
-            rowPrediction = (batchedResult['predictions'][sampleNumber] > 0.5)
-            rowTarget = batchedResult['targets'][sampleNumber]
-
-            prediction = torch.broadcast_to(rowPrediction, size=(rowPrediction.shape[0], 40))
-            target = torch.broadcast_to(rowTarget, size=(rowTarget.shape[0], 40))
-
-            img = torch.cat([image, prediction, target], dim=1).numpy().astype(np.uint8)
-            cv.imwrite(str(outPath / f'img_{i}.jpg'), img)
-
+# Visualize    
+eval_loop(dataloader=dataloader_val, model=model, loss_fn=lossFunctions, outPath=pathData / 'val_annotated')
 print('End')
