@@ -21,8 +21,10 @@ PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA = PATH_ROOT / 'data'
 IMAGE_FORMAT = '.jpg'
 
-COMPLEXITY = ['avg-matters']
-COMPLEXITY = ['avg-matters', 'dash-matters', 'include-cols']
+# COMPLEXITY = ['avg-matters']
+# COMPLEXITY = ['avg-matters', 'dash-matters']
+# COMPLEXITY = ['avg-matters', 'dash-matters', 'include-cols']
+COMPLEXITY = ['avg-matters', 'dash-matters', 'include-cols', 'include-capital']
 
 # Path stuff
 pathOut = PATH_DATA / f'fake_{len(COMPLEXITY)}'
@@ -43,12 +45,17 @@ class NumpyEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
     
 class Block(dict):
-    def __init__(self, purpose, color_average, pattern):
+    def __init__(self, purpose, color_average, pattern, text_capital=None):
         self.purpose = purpose
         self.color_average = color_average if color_average is not None else None
         self.pattern = pattern
+
+        if ('include-capital' in COMPLEXITY) and (text_capital is None) and (purpose == 'separator'):
+            self.text_capital = True
+        else:
+            self.text_capital = False
     def __repr__(self) -> str:
-        return f"({self.purpose[:7]}, color {self.color_average}, {self.pattern})"
+        return f"({self.purpose[:7]}, capital {self.text_capital}, color {self.color_average}, {self.pattern})"
     
 # Make folders
 replaceDirs(pathOut)
@@ -58,13 +65,16 @@ replaceDirs(pathAll / 'labels')
 replaceDirs(pathAll / 'features')
 
 # Block generators
-def typeToBlock(blockType, sizeOptions):
-    dim1 = sizeOptions['separator_size'] if blockType.purpose == 'separator' else sizeOptions['block_size']
-    dim2 = sizeOptions['otherDim_size']
+def typeToBlock(blockType, options):
+    # Dimensions
+    dim1 = options['separator_size'] if blockType.purpose in ['separator', 'fake-separator'] else options['block_size']
+    dim2 = options['otherDim_size']
 
+    # Purpose
     if blockType.purpose == 'no-separator':
         return None
-
+    
+    # Pattern
     if blockType.pattern == 'uniform':
         block = np.full(fill_value=blockType.color_average, shape=(dim1, dim2), dtype=np.float32)
     elif blockType.pattern == 'dash50':
@@ -75,27 +85,30 @@ def typeToBlock(blockType, sizeOptions):
 
     return block
 
-def generateBlock(separatorType, contentType, sizeOptions):
+def generateBlock(separatorType, contentType, options):
     # Content block
-    block = typeToBlock(blockType=contentType, sizeOptions=sizeOptions)
+    block = typeToBlock(blockType=contentType, options=options)
     
     # Add separator block
-    separator_block = typeToBlock(blockType=separatorType, sizeOptions=sizeOptions)
+    separator_block = typeToBlock(blockType=separatorType, options=options)
     if separator_block is not None:
-        separator_startRow = sizeOptions['separator_start']
-        separator_endRow = separator_startRow + separator_block.shape[0]
-        block[separator_startRow:separator_endRow] = separator_block
+        separator_start = options['separator_start']
+        separator_end = separator_start + separator_block.shape[0]
+        block[separator_start:separator_end] = separator_block
     
-    # for idx, row in enumerate(block):
-    #     print(idx, ': ', row)
+    # Text
+    if options['orientation'] == 'row':
+        text = 'Text' if separatorType.text_capital else 'text'
+        textBlock = cv.putText(img=(block*255).astype(np.uint8), text=text, org=(0, options['block_size']//3), fontFace=cv.FONT_HERSHEY_COMPLEX, fontScale=0.5, color=(0,))
+        block = np.round(textBlock.astype(np.float32) / 255, decimals=1)
 
     return block
 
-def generateGroundTruth(separatorType, sizeOptions):
-    dimFull = sizeOptions['block_size']
-    dimSeparator = sizeOptions['separator_size']
+def generateGroundTruth(separatorType, options):
+    dimFull = options['block_size']
+    dimSeparator = options['separator_size']
 
-    separator_start = sizeOptions['separator_start']
+    separator_start = options['separator_start']
     separator_end = separator_start + dimSeparator
 
     groundTruth = np.zeros(shape=(dimFull))
@@ -107,7 +120,10 @@ def generateGroundTruth(separatorType, sizeOptions):
 # Generate fake data
 def generateSample(complexity=COMPLEXITY):
     '''Complexity:
-        1: Square B/W image with thick, uniform rows '''
+        1: Square B/W image with thick, uniform rows 
+        2: + dashed borders
+        3: + columns
+        4: + text'''
     # Shapes
     row_blockCount = 10
     col_blockCount = 10
@@ -121,18 +137,20 @@ def generateSample(complexity=COMPLEXITY):
     separator_col_size = size_colBlock // 7
     separator_col_location = ((size_colBlock // separator_col_size) - 2) * separator_col_size
 
-    row_sizeOptions = {
+    row_options = {
         'block_size': size_rowBlock,
         'otherDim_size': size_colBlock*col_blockCount,
         'separator_size': separator_row_size,
         'separator_start': separator_row_location,
+        'orientation': 'row'
     }
 
-    col_sizeOptions = {
+    col_options = {
         'block_size': size_colBlock,
         'otherDim_size': size_rowBlock*row_blockCount,
         'separator_size': separator_col_size,
         'separator_start': separator_col_location,
+        'orientation': 'col'
     }
 
     # Base image
@@ -147,27 +165,30 @@ def generateSample(complexity=COMPLEXITY):
     if 'dash-matters' in complexity:
         classes_separators.append(Block(purpose='separator', color_average=0.5, pattern='dash50'))
         classes_content.append(Block(purpose='content', color_average=0.5, pattern='uniform'))
+    if 'include-capital' in complexity:
+        classes_separators.append(Block(purpose='fake-separator', color_average=0.5, pattern='dash50', text_capital=False))
+        classes_separators.append(Block(purpose='fake-separator', color_average=0, pattern='uniform', text_capital=False))
 
     # Rows
     # Rows | Generate visual
     row_separatorTypes = np.random.choice(classes_separators, size=row_blockCount, replace=True)
     row_contentTypes = np.random.choice(classes_content, size=row_blockCount, replace=True)
-    rowBlocks = [generateBlock(separatorType=row_separatorTypes[i], contentType=row_contentTypes[i], sizeOptions=row_sizeOptions) for i in range(row_blockCount)]        # i = 1
+    rowBlocks = [generateBlock(separatorType=row_separatorTypes[i], contentType=row_contentTypes[i], options=row_options) for i in range(row_blockCount)]        # i = 1
     rowContribution = np.concatenate(rowBlocks)
 
     # Rows | Get separator features
-    row_separator_gt = np.concatenate([generateGroundTruth(separatorType=row_separatorTypes[i], sizeOptions=row_sizeOptions) for i in range(row_blockCount)])
+    row_separator_gt = np.concatenate([generateGroundTruth(separatorType=row_separatorTypes[i], options=row_options) for i in range(row_blockCount)])
 
     # Cols
     if 'include-cols' in COMPLEXITY:   
         # Cols | Generate visual
         col_separatorTypes = np.random.choice(classes_separators, size=col_blockCount, replace=True)
         col_contentTypes = np.random.choice(classes_content, size=col_blockCount, replace=True)
-        colBlocks = [generateBlock(separatorType=col_separatorTypes[i], contentType=col_contentTypes[i], sizeOptions=col_sizeOptions) for i in range(col_blockCount)]        # i = 1
+        colBlocks = [generateBlock(separatorType=col_separatorTypes[i], contentType=col_contentTypes[i], options=col_options) for i in range(col_blockCount)]        # i = 1
         colContribution = np.concatenate(colBlocks).T
 
         # Cols | Get separator features
-        col_separator_gt = np.concatenate([generateGroundTruth(separatorType=col_separatorTypes[i], sizeOptions=col_sizeOptions) for i in range(col_blockCount)])
+        col_separator_gt = np.concatenate([generateGroundTruth(separatorType=col_separatorTypes[i], options=col_options) for i in range(col_blockCount)])
     else:
         colContribution = np.zeros_like(rowContribution)
         col_separator_gt = np.zeros(shape=(img_shape[1],))
