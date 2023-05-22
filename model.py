@@ -13,7 +13,7 @@ import string
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-COMPLEXITY = 3
+COMPLEXITY = 4
 BATCH_SIZE = 2
 LOSS_TYPES = ['row', 'col']
 TARGET_MAX_LUMINOSITY = 60

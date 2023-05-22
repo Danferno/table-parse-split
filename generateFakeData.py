@@ -99,7 +99,7 @@ def generateBlock(separatorType, contentType, options):
     # Text
     if options['orientation'] == 'row':
         text = 'Text' if separatorType.text_capital else 'text'
-        textBlock = cv.putText(img=(block*255).astype(np.uint8), text=text, org=(0, options['block_size']//3), fontFace=cv.FONT_HERSHEY_COMPLEX, fontScale=0.5, color=(0,))
+        textBlock = cv.putText(img=(block*255).astype(np.uint8), text=text, org=(5, options['block_size']//3), fontFace=cv.FONT_HERSHEY_COMPLEX, fontScale=0.4, color=(0,))
         block = np.round(textBlock.astype(np.float32) / 255, decimals=1)
 
     return block
@@ -128,7 +128,7 @@ def generateSample(complexity=COMPLEXITY):
     row_blockCount = 10
     col_blockCount = 10
     size_rowBlock = 60
-    size_colBlock = 50
+    size_colBlock = 80
     img_shape = (row_blockCount * size_rowBlock, col_blockCount * size_colBlock)
     
     separator_row_size = size_rowBlock // 4
@@ -205,22 +205,34 @@ def generateSample(complexity=COMPLEXITY):
     gt['col'] = col_separator_gt
 
     # Extract features
+    # Features | Visual
     features = {}
     features['row_absDiff'] = np.asarray([np.absolute(np.diff(row)).mean() for row in img])
     features['row_avg'] = np.asarray([np.mean(row) for row in img])
     
     features['col_absDiff'] =   np.asarray([np.absolute(np.diff(col)).mean() for col in img.T])
     features['col_avg'] = np.asarray([np.mean(col) for col in img.T])
+
+    # Features | Text
+    img_ocrReady = cv.cvtColor(src=(img*255).astype(np.uint8), code=cv.COLOR_GRAY2RGB)
+    import pytesseract
+    df = pytesseract.image_to_data(image=img_ocrReady, lang='eng', config=r'--psm 3', output_type=pytesseract.Output.DATAFRAME)
+    df = df.loc[(df.level == 5) & (df.conf > 0.3)]
+    df['text'] = df['text'].str.replace('[^a-zA-Z0-9]', '', regex=True)
+    df = df.loc[df.text.str.len() >= 3]
+    ...     # save bbox file
     
     # Save
     name = str(uuid4())
+    imagePath = str(pathAll /'images' / f'{name}.jpg')
     cv.imwrite(filename=str(pathAll /'images' / f'{name}.jpg'), img=img*255)
 
     with open(pathAll / 'labels' / f'{name}.json', 'w') as groundTruthFile:
         json.dump(gt, groundTruthFile, cls=NumpyEncoder)
     with open(pathAll / 'features' / f'{name}.json', 'w') as featureFile:
         json.dump(features, featureFile, cls=NumpyEncoder)
-    
+
+
 for i in tqdm(range(120), desc=f"Generating fake images of complexity {COMPLEXITY}"):
     generateSample()
 
