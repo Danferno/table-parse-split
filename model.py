@@ -112,7 +112,7 @@ sample = next(iter(dataloader_train))
 class TabliterModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.layer_row_avg = nn.Linear(in_features=1, out_features=1)
+        self.layer_row_avg = nn.Linear(in_features=2, out_features=1)
         self.layer_logit = nn.Sigmoid()
     
     def forward(self, sample):
@@ -122,7 +122,9 @@ class TabliterModel(nn.Module):
         # logits = torch.cat([self.layer_logit(intermediate_input) for intermediate_input in intermediate_inputs])
 
         row_avg_inputs = sample['features']['row_avg']
-        row_avgs = self.layer_row_avg(row_avg_inputs)
+        row_absDiff_inputs = sample['features']['row_absDiff']
+        row_inputs = torch.cat([row_avg_inputs, row_absDiff_inputs], dim=-1)
+        row_avgs = self.layer_row_avg(row_inputs)
         
         intermediate_inputs = row_avgs
         logits = self.layer_logit(intermediate_inputs)
