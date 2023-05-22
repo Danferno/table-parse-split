@@ -12,8 +12,12 @@ import numpy as np
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-COMPLEXITY = 1
+COMPLEXITY = 2
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+BATCH_SIZE = 2
+
+TARGET_MAX_LUMINOSITY = 240
+PREDS_MAX_LUMINOSITY = 200
 
 # Paths
 pathData = PATH_ROOT / 'data' / f'fake_{COMPLEXITY}'
@@ -68,14 +72,14 @@ class TableDataset(Dataset):
         with open(pathLabel, 'r') as f:
             labelData = json.load(f)
         sample['label'] = {}
-        sample['label']['row'] = Tensor(labelData['row'])
+        sample['label']['row'] = Tensor(labelData['row']).unsqueeze(-1)
     
         # Load sample | Features
         with open(pathFeatures, 'r') as f:
             featuresData = json.load(f)
         sample['features'] = {}
-        sample['features']['row_absDiff'] = Tensor(featuresData['row_absDiff'])
-        sample['features']['row_avg'] = Tensor(featuresData['row_avg'])
+        sample['features']['row_absDiff'] = Tensor(featuresData['row_absDiff']).unsqueeze(-1)
+        sample['features']['row_avg'] = Tensor(featuresData['row_avg']).unsqueeze(-1)
 
         # Optional transform
         if self.transform:
@@ -88,21 +92,21 @@ class TableDataset(Dataset):
         return sample    
 
 dataset_train = TableDataset(dir_data=pathData / 'train')
-dataloader_train = DataLoader(dataset=dataset_train, batch_size=1, shuffle=True)
+dataloader_train = DataLoader(dataset=dataset_train, batch_size=BATCH_SIZE, shuffle=True)
 
 dataset_val = TableDataset(dir_data=pathData / 'val')
-dataloader_val = DataLoader(dataset=dataset_val, batch_size=1, shuffle=True)
+dataloader_val = DataLoader(dataset=dataset_val, batch_size=BATCH_SIZE, shuffle=False)
 
 dataset_test = TableDataset(dir_data=pathData / 'test')
-dataloader_test = DataLoader(dataset=dataset_val, batch_size=1, shuffle=True)
+dataloader_test = DataLoader(dataset=dataset_val, batch_size=BATCH_SIZE, shuffle=False)
 
 sample = next(iter(dataloader_train))
-img = sample['image'][0].squeeze().numpy()
-# cv.imshow('img', img); cv.waitKey(0)
-label = sample['label']['row'][0]
-features = sample['features']
-feature_row_absDiff = features['row_absDiff'][0]
-feature_row_avg = features['row_avg'][0]
+# img = sample['image'][0].squeeze().numpy()
+# # cv.imshow('img', img); cv.waitKey(0)
+# label = sample['label']['row'][0]
+# features = sample['features']
+# feature_row_absDiff = features['row_absDiff'][0]
+# feature_row_avg = features['row_avg'][0]
 
 # Model
 class TabliterModel(nn.Module):
@@ -112,11 +116,16 @@ class TabliterModel(nn.Module):
         self.layer_logit = nn.Sigmoid()
     
     def forward(self, sample):
-        row_avg_inputs = [row.view(1,) for row in sample['features']['row_avg'].squeeze()]
-        row_avgs = [self.layer_row_avg(row_avg_input) for row_avg_input in row_avg_inputs]
+        # row_avg_inputs = [row.view(1,) for row in sample['features']['row_avg'].squeeze()]
+        # row_avgs = [self.layer_row_avg(row_avg_input) for row_avg_input in row_avg_inputs]
+        # intermediate_inputs = [Tensor(row_avgs[i]) for i in range(len(row_avgs))]
+        # logits = torch.cat([self.layer_logit(intermediate_input) for intermediate_input in intermediate_inputs])
 
-        intermediate_inputs = [Tensor(row_avgs[i]) for i in range(len(row_avgs))]
-        logits = torch.cat([self.layer_logit(intermediate_input) for intermediate_input in intermediate_inputs])
+        row_avg_inputs = sample['features']['row_avg']
+        row_avgs = self.layer_row_avg(row_avg_inputs)
+        
+        intermediate_inputs = row_avgs
+        logits = self.layer_logit(intermediate_inputs)
         
         return logits
 
@@ -154,20 +163,18 @@ class WeightedBinaryCrossEntropyLoss(nn.Module):
 
 # Train
 lr = 1e-1
-batch_size = 1
-epochs = 20
+epochs = 10
 loss_fn = WeightedBinaryCrossEntropyLoss(weights=classWeights)
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
-def train_loop(dataloader, model, loss_fn, optimizer):
+def train_loop(dataloader, model, loss_fn, optimizer, report_frequency=4):
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
-    for batch, sample in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
+    for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
         # Compute prediction and loss
-        sample = sample
-        targets_row = sample['label']['row'].to(DEVICE)
-        preds_row = model(sample).to(DEVICE)
-        preds_row = preds_row.view(batch_size, preds_row.size(0) // batch_size)
+        batch = batch
+        targets_row = batch['label']['row'].to(DEVICE)
+        preds_row = model(batch).to(DEVICE)
         loss = loss_fn(preds_row, targets_row)
 
         # Backpropagation
@@ -176,9 +183,9 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         optimizer.zero_grad()
 
         # Report 4 times
-        quarter_size = (size / batch_size) // 4
-        if batch % quarter_size == 0:
-            loss, current = loss.item(), (batch + 1) * batch_size
+        report_batch_size = (size / batch_size) // report_frequency
+        if (batchNumber+1) % report_batch_size == 0:
+            loss, current = loss.item(), (batchNumber+1) * batch_size
             print(f'Loss: {loss:>7f} [{current:>5d}/{size:>5d}]')
 
 def val_loop(dataloader, model, loss_fn):
@@ -186,16 +193,15 @@ def val_loop(dataloader, model, loss_fn):
     batchCount = len(dataloader)
     val_loss, correct = 0,0
     with torch.no_grad():
-        for sample in dataloader:     # sample = next(iter(dataloader))
+        for batch in dataloader:     # batch = next(iter(dataloader))
             # Compute prediction and loss
-            targets_row = sample['label']['row']
-            preds_row = model(sample)
-            preds_row = preds_row.view(batch_size, preds_row.size(0) // batch_size)
+            targets_row = batch['label']['row']
+            preds_row = model(batch)
 
             val_loss += loss_fn(preds_row, targets_row).item()
             correct += ((preds_row >= 0.5) == targets_row).sum().item()
 
-    rows_per_image = targets_row.shape[-1]
+    rows_per_image = targets_row.shape[1]
     val_loss = val_loss / batchCount
     correct = correct / (sampleCount * rows_per_image)
 
@@ -205,53 +211,61 @@ def val_loop(dataloader, model, loss_fn):
 
 for t in range(epochs):
     print(f"Epoch {t+1} -------------------------------")
-    train_loop(dataloader=dataloader_train, model=model, loss_fn=loss_fn, optimizer=optimizer)
+    train_loop(dataloader=dataloader_train, model=model, loss_fn=loss_fn, optimizer=optimizer, report_frequency=1)
     val_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn)
 
 
 # Predict
-def eval_loop(dataloader, model, loss_fn):
-    sampleCount = len(dataloader.dataset)
+def eval_loop(dataloader, model, loss_fn, outPath=None):
     batchCount = len(dataloader)
-    eval_loss, correct = 0,0
-    predictions = []
-    targets = []
+    eval_loss, correct, maxCorrect = 0,0,0
     with torch.no_grad():
-        for batch in dataloader:
-            sample = batch
-            targets_row = sample['label']['row']
-            preds_row = model(sample)
-            preds_row = preds_row.view(batch_size, preds_row.size(0) // batch_size)
+        for batchNumber, batch in enumerate(dataloader):
+            # Predict
+            targets_row = batch['label']['row']
+            preds_row = model(batch)
 
+            # Eval
             eval_loss += loss_fn(preds_row, targets_row).item()
             correct += ((preds_row >= 0.5) == targets_row).sum().item()
-            predictions.append(preds_row)
-            targets.append(targets_row)
+            maxCorrect += preds_row.numel()
 
-    rows_per_image = targets_row.shape[-1]
+            # Visualise
+            if outPath:
+                imagePixels = torch.flatten(batch['image'], end_dim=2)
+                row_target_pixels = torch.broadcast_to(input=torch.flatten(targets_row, end_dim=1), size=(targets_row.numel(), 40)) * TARGET_MAX_LUMINOSITY
+                row_prediction_pixels = (torch.broadcast_to(input=torch.flatten(preds_row, end_dim=1), size=(preds_row.numel(), 40)) >= 0.5)* PREDS_MAX_LUMINOSITY
+
+                rowPixels = torch.cat([row_target_pixels, row_prediction_pixels], dim=1)
+
+                img = torch.cat([imagePixels, rowPixels], dim=1).numpy().astype(np.uint8)
+                cv.imwrite(str(outPath / f'img_{batchNumber}.jpg'), img)
+
     eval_loss = eval_loss / batchCount
-    correct = correct / (sampleCount * rows_per_image)
+    correct = correct / maxCorrect
 
     print(f'''Evaluation (normally on val)
         Accuracy: {(100*correct):>0.1f}%
         Avg val loss: {eval_loss:>8f}''')
-    return predictions, targets
     
-predictions, targets = eval_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn)
+    if outPath:
+        return outPath
+    
+eval_loop(dataloader=dataloader_val, model=model, loss_fn=loss_fn, outPath=pathData / 'val_annotated')
 
 # Visualise
-def visualize(prediction, target, i, outPath):
-    rowPrediction = prediction.squeeze() > 0.5
-    rowTarget = target.squeeze()
+def visualize(batchedResults, outPath):
+    for batchedResult in batchedResults:
+        batchSize = batchedResult['images'].shape[0]
+        for sampleNumber in range(batchSize):
+            image = batchedResult['images'][sampleNumber].squeeze()
+            rowPrediction = (batchedResult['predictions'][sampleNumber] > 0.5)
+            rowTarget = batchedResult['targets'][sampleNumber]
 
-    prediction = rowPrediction.unsqueeze(1).repeat(1, 300) * 255
-    target = rowTarget.unsqueeze(1).repeat(1, 50) * 128
+            prediction = torch.broadcast_to(rowPrediction, size=(rowPrediction.shape[0], 40))
+            target = torch.broadcast_to(rowTarget, size=(rowTarget.shape[0], 40))
 
-    img = torch.cat([prediction, target], dim=1).numpy().astype(np.uint8)
-    # cv.imshow("img", img); cv.waitKey(0)
-    cv.imwrite(str(outPath / f'img_{i}.jpg'), img)
-
-for i in range(len(predictions)):
-    visualize(prediction=predictions[i], target=targets[i], i=i, outPath=pathData / 'val_annotated')
+            img = torch.cat([image, prediction, target], dim=1).numpy().astype(np.uint8)
+            cv.imwrite(str(outPath / f'img_{i}.jpg'), img)
 
 print('End')

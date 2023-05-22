@@ -20,7 +20,8 @@ from uuid import uuid4
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA = PATH_ROOT / 'data'
 IMAGE_FORMAT = '.jpg'
-COMPLEXITY = ['avg-matters', 'dash-matters']
+COMPLEXITY = ['avg-matters']
+#COMPLEXITY = ['avg-matters', 'dash-matters']
 
 # Path stuff
 pathOut = PATH_DATA / f'fake_{len(COMPLEXITY)}'
