@@ -1,4 +1,5 @@
 # Imports
+import shutil
 import os, sys
 from pathlib import Path
 import json
@@ -6,10 +7,13 @@ import torch
 from torch import nn
 from torchvision.io import read_image, ImageReadMode
 from torch.utils.data import Dataset, DataLoader
-from torch import ByteTensor, Tensor, as_tensor
+from torch import Tensor
+from prettytable import PrettyTable
+from torchviz import make_dot
 import cv2 as cv
 import numpy as np
 import string
+from collections import namedtuple, OrderedDict
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -25,8 +29,15 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 LOSS_TYPES_COUNT = len(LOSS_TYPES)
 
 # Paths
+def replaceDirs(path):
+    try:
+        os.makedirs(path)
+    except FileExistsError:
+        shutil.rmtree(path)
+        os.makedirs(path)
 pathData = PATH_ROOT / 'data' / f'fake_{COMPLEXITY}'
-os.makedirs(pathData / 'val_annotated', exist_ok=True)
+pathLogs = PATH_ROOT / 'torchlogs'
+replaceDirs(pathData / 'val_annotated')
 
 # Data
 class TableDataset(Dataset):
@@ -115,41 +126,61 @@ dataloader_val = DataLoader(dataset=dataset_val, batch_size=BATCH_SIZE, shuffle=
 dataset_test = TableDataset(dir_data=pathData / 'test')
 dataloader_test = DataLoader(dataset=dataset_val, batch_size=BATCH_SIZE, shuffle=False)
 
-sample = next(iter(dataloader_train))
-# img = sample['image'][0].squeeze().numpy()
-# # cv.imshow('img', img); cv.waitKey(0)
-# label = sample['label']['row'][0]
-# features = sample['features']
-# feature_row_absDiff = features['row_absDiff'][0]
-# feature_row_avg = features['row_avg'][0]
-
 # Model
+Output = namedtuple('output', LOSS_TYPES)
+
 class TabliterModel(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden_sizes=[15,10], layer_depth=3):
         super().__init__()
-        self.layer_linear = nn.Linear(in_features=2, out_features=1)
+        self.hidden_sizes = hidden_sizes
+        self.layer_depth = layer_depth
+
+        self.layer_linear_row = self.addLayer(layerType=nn.Linear, in_features=5, out_features=1)
+        self.layer_linear_col = self.addLayer(layerType=nn.Linear, in_features=4, out_features=1)
+
         self.layer_logit = nn.Sigmoid()
+    
+    def addLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
+        sequence = nn.Sequential(OrderedDict([
+            (f'lin_from{in_features}_to{self.hidden_sizes[0]}', layerType(in_features=in_features, out_features=self.hidden_sizes[0])),
+            (f'relu_1', activation()),
+            (f'lin_from{self.hidden_sizes[0]}_to{self.hidden_sizes[1]}', layerType(in_features=self.hidden_sizes[0], out_features=self.hidden_sizes[1])),
+            (f'relu_2', activation()),
+            (f'lin_from{self.hidden_sizes[1]}_to{out_features}', layerType(in_features=self.hidden_sizes[1], out_features=out_features))
+        ]))
+        return sequence
     
     def forward(self, sample):
         # Row
+        # Row | Inputs
         row_avg_inputs = sample['features']['row_avg']
         row_absDiff_inputs = sample['features']['row_absDiff']
-        row_inputs = torch.cat([row_avg_inputs, row_absDiff_inputs], dim=-1)
-        row_intermediate_inputs = self.layer_linear(row_inputs)
-        
+        row_spell_mean_inputs = sample['features']['row_spell_mean']
+        row_spell_sd_inputs = sample['features']['row_spell_sd']
+        row_firstletter_capitalOrNumeric_inputs = sample['features']['row_firstletter_capitalOrNumeric']
+        row_inputs = torch.cat([row_avg_inputs, row_absDiff_inputs, row_spell_mean_inputs, row_spell_sd_inputs, row_firstletter_capitalOrNumeric_inputs], dim=-1)
+
+        # Row | Layers
+        row_intermediate_inputs = self.layer_linear_row(row_inputs)
         row_probs = self.layer_logit(row_intermediate_inputs)
 
         # Col
         col_avg_inputs = sample['features']['col_avg']
         col_absDiff_inputs = sample['features']['col_absDiff']
-        col_inputs = torch.cat([col_avg_inputs, col_absDiff_inputs], dim=-1)
-        col_intermediate_inputs = self.layer_linear(col_inputs)
-        
+        col_spell_mean_inputs = sample['features']['col_spell_mean']
+        col_spell_sd_inputs = sample['features']['col_spell_sd']
+        col_inputs = torch.cat([col_avg_inputs, col_absDiff_inputs, col_spell_mean_inputs, col_spell_sd_inputs], dim=-1)
+
+        # Col | Layers
+        col_intermediate_inputs = self.layer_linear_col(col_inputs)
         col_probs = self.layer_logit(col_intermediate_inputs)
-       
-        return {'row': row_probs, 'col': col_probs}
+
+        # Output
+        return Output(row=row_probs, col=col_probs)
 
 model = TabliterModel()
+#model = torch.compile(model=model, mode='reduce-overhead')
+sample = next(iter(dataloader_train))
 logits = model(sample)
 
 # Loss function
@@ -175,7 +206,7 @@ class WeightedBinaryCrossEntropyLoss(nn.Module):
         super(WeightedBinaryCrossEntropyLoss, self).__init__()
         self.weights = weights
     def forward(self, input, target):
-        input_clamped = torch.clamp(input, min=1e-8, max=1-1e-8)
+        input_clamped = torch.clamp(input, min=1e-7, max=1-1e-7)
         if self.weights is not None:
             assert len(self.weights) == 2
             loss =  self.weights[0] * ((1-target) * torch.log(1- input_clamped)) + \
@@ -187,12 +218,12 @@ class WeightedBinaryCrossEntropyLoss(nn.Module):
         return torch.neg(torch.mean(loss))
 
 def calculateLoss(batch, preds, lossFunctions:dict, calculateCorrect=False):   
-    loss = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE)
+    loss = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.float32)
     correct, maxCorrect = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
 
     for idx, lossType in enumerate(LOSS_TYPES):
         target = batch['label'][lossType].to(DEVICE)
-        pred = preds[lossType].to(DEVICE)
+        pred = preds[idx].to(DEVICE)
         loss_fn = lossFunctions[lossType]
 
         loss[idx] = loss_fn(pred, target)
@@ -208,8 +239,8 @@ def calculateLoss(batch, preds, lossFunctions:dict, calculateCorrect=False):
 
 
 # Train
-lr = 1e-1
-epochs = 10
+lr = 9e-2
+epochs = 30
 lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
                  'col': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
@@ -259,7 +290,7 @@ for t in range(epochs):
 
 
 # Predict
-def eval_loop(dataloader, model, loss_fn, outPath=None):
+def eval_loop(dataloader, model, lossFunctions, outPath=None):
     batchCount = len(dataloader)
     eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
     with torch.no_grad():
@@ -278,9 +309,9 @@ def eval_loop(dataloader, model, loss_fn, outPath=None):
                     # Get sample info
                     image = batch['image'][sampleNumber]
                     row_targets = batch['label']['row'][sampleNumber]
-                    row_predictions = preds['row'][sampleNumber]
+                    row_predictions = preds.row[sampleNumber]
                     col_targets = batch['label']['col'][sampleNumber]
-                    col_predictions = preds['col'][sampleNumber]
+                    col_predictions = preds.col[sampleNumber]
                     outName = 'img_' + str(batchNumber) + string.ascii_lowercase[sampleNumber]  
 
                     imagePixels = torch.flatten(image, end_dim=1)                   
@@ -309,6 +340,29 @@ def eval_loop(dataloader, model, loss_fn, outPath=None):
     if outPath:
         return outPath
 
-# Visualize    
-eval_loop(dataloader=dataloader_val, model=model, loss_fn=lossFunctions, outPath=pathData / 'val_annotated')
-print('End')
+# Visualize results
+eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
+
+# Visualize model
+# Model | Graph
+y = model(sample)
+make_dot(y, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(pathLogs / 'graph', format='png')
+
+# Count parameters
+def count_parameters(model):
+    table = PrettyTable(["Modules", "Parameters"])
+    total_params = 0
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad: continue
+        params = parameter.numel()
+        table.add_row([name, params])
+        total_params+=params
+    print(table)
+    print(f"Total Trainable Params: {total_params}")
+    return total_params
+count_parameters(model=model)
+
+# Show weights
+# for name, param in model.named_parameters():
+#     print(name, param.data, param.requires_grad)
+...

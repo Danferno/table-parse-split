@@ -21,7 +21,8 @@ import pytesseract
 # Constants
 PARALLEL = True
 TEXT_THROUGH_OCR = False
-PRECISION = np.float16
+PRECISION = np.float32
+SAMPLE_SIZE = 300
 
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA = PATH_ROOT / 'data'
@@ -82,10 +83,9 @@ def getSpellLengths(inarray):
         if n == 0: 
             return (None, None, None)
         else:
-            y = ia[1:] != ia[:-1]               # pairwise unequal (string safe)
-            i = np.append(np.where(y), n - 1)   # must include last element posi
-            z = np.diff(np.append(-1, i))       # run lengths
-            p = np.cumsum(np.append(0, z))[:-1] # positions
+            y = ia[1:] != ia[:-1]                # pairwise unequal (string safe)
+            i = np.append(np.where(y), n - 1)    # must include last element posi
+            z = np.diff(np.append(-1, i)) / n        # run lengths
             return z
 
 # Make folders
@@ -200,21 +200,24 @@ def generateSample(complexity=COMPLEXITY):
     img_base = np.zeros(shape=img_shape, dtype=np.float32)
     
     # Block classes
-    classes_separators = [Block(purpose='no-separator', color_average=None, pattern=None)]
+    classes_separators_common = [Block(purpose='no-separator', color_average=None, pattern=None)]
     classes_content = []
     if 'avg-matters' in complexity:
-        classes_separators.append(Block(purpose='separator', color_average=0, pattern='uniform'))
+        classes_separators_common.append(Block(purpose='separator', color_average=0, pattern='uniform'))
         classes_content.append(Block(purpose='content', color_average=1, pattern='uniform'))
     if 'dash-matters' in complexity:
-        classes_separators.append(Block(purpose='separator', color_average=0.5, pattern='dash50'))
+        classes_separators_common.append(Block(purpose='separator', color_average=0.5, pattern='dash50'))
         classes_content.append(Block(purpose='content', color_average=0.5, pattern='uniform'))
+    
+    classes_separators_row = classes_separators_common.copy()
+    classes_separators_col = classes_separators_common.copy()
     if 'include-capital' in complexity:
-        classes_separators.append(Block(purpose='fake-separator', color_average=0.5, pattern='dash50', text_capital=False))
-        classes_separators.append(Block(purpose='fake-separator', color_average=0, pattern='uniform', text_capital=False))
+        classes_separators_row.append(Block(purpose='fake-separator', color_average=0, pattern='uniform', text_capital=False))
+    
 
     # Rows
     # Rows | Generate visual
-    row_separatorTypes = np.random.choice(classes_separators, size=row_blockCount, replace=True)
+    row_separatorTypes = np.random.choice(classes_separators_row, size=row_blockCount, replace=True)
     row_contentTypes = np.random.choice(classes_content, size=row_blockCount, replace=True)
     rowBlocks = [generateBlock(separatorType=row_separatorTypes[i], contentType=row_contentTypes[i], options=row_options) for i in range(row_blockCount)]        # i = 1
     rowContribution = np.concatenate(rowBlocks)
@@ -225,7 +228,7 @@ def generateSample(complexity=COMPLEXITY):
     # Cols
     if 'include-cols' in COMPLEXITY:   
         # Cols | Generate visual
-        col_separatorTypes = np.random.choice(classes_separators, size=col_blockCount, replace=True)
+        col_separatorTypes = np.random.choice(classes_separators_col, size=col_blockCount, replace=True)
         col_contentTypes = np.random.choice(classes_content, size=col_blockCount, replace=True)
         colBlocks = [generateBlock(separatorType=col_separatorTypes[i], contentType=col_contentTypes[i], options=col_options) for i in range(col_blockCount)]        # i = 1
         colContribution = np.concatenate(colBlocks).T
@@ -334,9 +337,9 @@ def generateSample(complexity=COMPLEXITY):
         json.dump(features, featureFile, cls=NumpyEncoder)
 
 if PARALLEL:
-    _ = Parallel(n_jobs=8, backend='loky', verbose=6)(delayed(generateSample)() for i in range(120))
+    _ = Parallel(n_jobs=8, backend='loky', verbose=6)(delayed(generateSample)() for i in range(SAMPLE_SIZE))
 else:
-    for i in tqdm(range(120), desc=f"Generating fake images of complexity {COMPLEXITY}"):
+    for i in tqdm(range(SAMPLE_SIZE), desc=f"Generating fake images of complexity {COMPLEXITY}"):
         generateSample()
 
 
