@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from typing import Literal
 from datetime import datetime
 import json
+import pandas as pd
 from joblib import Parallel, delayed
 import random
 from uuid import uuid4
@@ -152,12 +153,12 @@ def generateGroundTruth(separatorType, options):
 def generateTextFeature(idx, separatorType, row_options):
     capital_or_numeric = (separatorType.text_capital)
     left = TEXT_LEFT - 2
-    bottom = row_options['block_size'] // TEXT_BOTTOM_FACTOR + idx*row_options['block_size'] + 2
+    bottom = row_options['block_size'] // TEXT_BOTTOM_FACTOR + idx*row_options['block_size'] + 3
     right = left + 40
-    top = bottom - 15
+    top = max(0, bottom - 17)
 
-    firstletter_capital_or_numeric = np.array([left, top, right, bottom, np.random.randint(low=50, high=100), capital_or_numeric], dtype=np.uint16)
-    return firstletter_capital_or_numeric
+    firstletter_capitalOrNumeric = {'xmin': left, 'xmax': right, 'ymin': top, 'ymax': bottom, 'conf': np.random.randint(low=50, high=100), 'firstletter_capitalOrNumeric': capital_or_numeric}
+    return firstletter_capitalOrNumeric
 
 # Generate fake data
 def generateSample(complexity=COMPLEXITY):
@@ -271,7 +272,7 @@ def generateSample(complexity=COMPLEXITY):
     features['col_spell_mean'] = [np.mean(col_spell_length) for col_spell_length in col_spell_lengths]
     features['col_spell_sd'] = [np.std(col_spell_length) for col_spell_length in col_spell_lengths]
 
-    # Features | Text
+    # Features | Text | Find text
     if TEXT_THROUGH_OCR:
         # Features | Text | Prepare image for OCR
         img_ocr = img_cv.copy()
@@ -285,32 +286,43 @@ def generateSample(complexity=COMPLEXITY):
             df['right'] = df['left'] + df['width']
             df['bottom'] = df['top'] + df['height']
             df['conf'] = df['conf'].astype(int)
-            df['capital_or_number'] = (df['text'].str[0].str.isupper() | df['text'].str[0].str.isdigit())*1
-
-            if SAVE_ANNOTATED_TEXT:
-                img_annot = img_cv.copy()
-                for idx, row in df.iterrows():
-                    cv.rectangle(img=img_annot, pt1=(row['left'], row['top']), pt2=(row['right'], row['bottom']), color=20, thickness=2)
-
-                pathImage_annotated = str(pathAll /'images_text' / f'{name}.jpg')
-                cv.imwrite(filename=pathImage_annotated, img=img_annot)
+            df['firstletter_capital_or_number'] = (df['text'].str[0].str.isupper() | df['text'].str[0].str.isdigit())*1
 
             # Features | Text | Convert to feature
             df = df.astype({col: int for col in ['left', 'right', 'bottom', 'top', 'capital_or_number']})
-            features['firstletter_capital_or_numeric'] = df[['left', 'top', 'right', 'bottom', 'conf', 'capital_or_number']].to_numpy()
+            firstletter_capitalOrNumeric = df[['left', 'top', 'right', 'bottom', 'conf', 'firstletter_capital_or_number']]
         else:
-            features['firstletter_capital_or_numeric'] = np.array([[]])
+            raise Exception('No text found')
     else:
-        features['firstletter_capital_or_numeric'] = np.array([generateTextFeature(idx, separatorType, row_options=row_options) for idx, separatorType in enumerate(row_separatorTypes)])
-        if SAVE_ANNOTATED_TEXT:
-            img_annot = img_cv.copy()
-            for textFeatureArray in features['firstletter_capital_or_numeric']:
-                color = 40 if textFeatureArray[-1] == 0 else 160
-                cv.rectangle(img=img_annot, pt1=(textFeatureArray[0], textFeatureArray[1]), pt2=(textFeatureArray[2], textFeatureArray[3]), color=color, thickness=2)
+        firstletter_capitalOrNumeric = pd.DataFrame.from_records([generateTextFeature(idx, separatorType, row_options=row_options) for idx, separatorType in enumerate(row_separatorTypes)])
+  
+    # Features | Text | Assign capital/number status to each row [TD: take max if multiple rows]
+    df = firstletter_capitalOrNumeric.copy()
+    df = df.loc[(df.conf > 0.5)]
+    df = df[['ymin', 'firstletter_capitalOrNumeric']]
+    df = df.set_index('ymin').reindex(range(0, img.shape[0]))
+    df['firstletter_capitalOrNumeric'] = df['firstletter_capitalOrNumeric'].fillna(method='ffill')
+    df['firstletter_capitalOrNumeric'] = df['firstletter_capitalOrNumeric'].fillna(value=False)
+    df.to_csv('temp.csv')
+    row_firstletter_capitalOrNumeric = df['firstletter_capitalOrNumeric'].astype(int).to_numpy().astype(np.uint8)
+    features['row_firstletter_capitalOrNumeric'] = row_firstletter_capitalOrNumeric
 
-            pathImage_annotated = str(pathAll /'images_text' / f'{name}.jpg')
-            cv.imwrite(filename=pathImage_annotated, img=img_annot)
+    if SAVE_ANNOTATED_TEXT:
+        # Get img
+        img_annot = img_cv.copy()
 
+        # Add text boxes
+        for idx, row in firstletter_capitalOrNumeric.iterrows():
+            color = 160 if row['firstletter_capitalOrNumeric'] else 40
+            cv.rectangle(img=img_annot, pt1=(row['xmin'], row['ymin']), pt2=(row['xmax'], row['ymax']), color=color, thickness=2)
+
+        # Add row-level indicators
+        indicator_capitalOrNumeric = np.expand_dims(row_firstletter_capitalOrNumeric, 1)
+        indicator_capitalOrNumeric = np.broadcast_to(indicator_capitalOrNumeric, shape=[indicator_capitalOrNumeric.shape[0], 40])
+        indicator_capitalOrNumeric = indicator_capitalOrNumeric * 200
+        img_annot = np.concatenate([img_annot, indicator_capitalOrNumeric], axis=1)
+        pathImage_annotated = str(pathAll /'images_text' / f'{name}.jpg')
+        cv.imwrite(filename=pathImage_annotated, img=img_annot)
 
     # Save
     imagePath = str(pathAll /'images' / f'{name}.jpg')
