@@ -88,7 +88,13 @@ class TableDataset(Dataset):
         sample['features']['col_avg'] = Tensor(featuresData['col_avg']).unsqueeze(-1)
         sample['features']['row_absDiff'] = Tensor(featuresData['row_absDiff']).unsqueeze(-1)
         sample['features']['col_absDiff'] = Tensor(featuresData['col_absDiff']).unsqueeze(-1)
-        
+
+        sample['features']['row_spell_mean'] = Tensor(featuresData['row_spell_mean']).unsqueeze(-1)
+        sample['features']['row_spell_sd'] = Tensor(featuresData['row_spell_sd']).unsqueeze(-1)
+        sample['features']['col_spell_mean'] = Tensor(featuresData['col_spell_mean']).unsqueeze(-1)
+        sample['features']['col_spell_sd'] = Tensor(featuresData['col_spell_sd']).unsqueeze(-1)
+
+        sample['features']['row_firstletter_capitalOrNumeric'] = Tensor(featuresData['row_firstletter_capitalOrNumeric']).unsqueeze(-1)
 
         # Optional transform
         if self.transform:
