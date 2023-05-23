@@ -12,19 +12,32 @@ import matplotlib.pyplot as plt
 from typing import Literal
 from datetime import datetime
 import json
-import pandas as pd
+from joblib import Parallel, delayed
 import random
 from uuid import uuid4
+import pytesseract
 
 # Constants
+PARALLEL = True
+TEXT_THROUGH_OCR = False
+PRECISION = np.float16
+
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA = PATH_ROOT / 'data'
 IMAGE_FORMAT = '.jpg'
+
+# THRESHOLD_GRAY = 255; THRESHOLD_METHOD = cv.THRESH_BINARY+cv.THRESH_OTSU      # unrestricted thresholding
+TEXT_LEFT = 5
+TEXT_BOTTOM_FACTOR = 4
+THRESHOLD_GRAY = 100; THRESHOLD_METHOD = cv.THRESH_BINARY                        # restricted (because lots of gray in our fake images)
+SAVE_ANNOTATED_TEXT = True
+
 
 # COMPLEXITY = ['avg-matters']
 # COMPLEXITY = ['avg-matters', 'dash-matters']
 # COMPLEXITY = ['avg-matters', 'dash-matters', 'include-cols']
 COMPLEXITY = ['avg-matters', 'dash-matters', 'include-cols', 'include-capital']
+
 
 # Path stuff
 pathOut = PATH_DATA / f'fake_{len(COMPLEXITY)}'
@@ -56,13 +69,31 @@ class Block(dict):
             self.text_capital = False
     def __repr__(self) -> str:
         return f"({self.purpose[:7]}, capital {self.text_capital}, color {self.color_average}, {self.pattern})"
-    
+
+def getSpellLengths(inarray):
+        """ run length encoding. Partial credit to R rle function. 
+            Multi datatype arrays catered for including non Numpy
+            returns: runlengths
+            source: https://stackoverflow.com/a/32681075/7909205"""
+        
+        ia = np.asarray(inarray)                # force numpy
+        n = len(ia)
+        if n == 0: 
+            return (None, None, None)
+        else:
+            y = ia[1:] != ia[:-1]               # pairwise unequal (string safe)
+            i = np.append(np.where(y), n - 1)   # must include last element posi
+            z = np.diff(np.append(-1, i))       # run lengths
+            p = np.cumsum(np.append(0, z))[:-1] # positions
+            return z
+
 # Make folders
 replaceDirs(pathOut)
 replaceDirs(pathAll)
 replaceDirs(pathAll / 'images')
 replaceDirs(pathAll / 'labels')
 replaceDirs(pathAll / 'features')
+replaceDirs(pathAll / 'images_text')
 
 # Block generators
 def typeToBlock(blockType, options):
@@ -78,7 +109,8 @@ def typeToBlock(blockType, options):
     if blockType.pattern == 'uniform':
         block = np.full(fill_value=blockType.color_average, shape=(dim1, dim2), dtype=np.float32)
     elif blockType.pattern == 'dash50':
-        block_dim1 = np.tile(A=[0, 1], reps=dim2 // 2).astype(np.float32)
+        pattern = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        block_dim1 = np.tile(A=pattern, reps=dim2 // len(pattern)).astype(np.float32)
         block = np.broadcast_to(block_dim1, shape=(dim1, dim2))
     else:
         raise ValueError(f'{blockType.pattern} pattern not supported')    
@@ -99,7 +131,7 @@ def generateBlock(separatorType, contentType, options):
     # Text
     if options['orientation'] == 'row':
         text = 'Text' if separatorType.text_capital else 'text'
-        textBlock = cv.putText(img=(block*255).astype(np.uint8), text=text, org=(5, options['block_size']//3), fontFace=cv.FONT_HERSHEY_COMPLEX, fontScale=0.4, color=(0,))
+        textBlock = cv.putText(img=(block*255).astype(np.uint8), text=text, org=(TEXT_LEFT, options['block_size']//TEXT_BOTTOM_FACTOR), fontFace=cv.FONT_HERSHEY_DUPLEX, fontScale=0.6, color=(0,))
         block = np.round(textBlock.astype(np.float32) / 255, decimals=1)
 
     return block
@@ -117,6 +149,16 @@ def generateGroundTruth(separatorType, options):
 
     return groundTruth
 
+def generateTextFeature(idx, separatorType, row_options):
+    capital_or_numeric = (separatorType.text_capital)
+    left = TEXT_LEFT - 2
+    bottom = row_options['block_size'] // TEXT_BOTTOM_FACTOR + idx*row_options['block_size'] + 2
+    right = left + 40
+    top = bottom - 15
+
+    firstletter_capital_or_numeric = np.array([left, top, right, bottom, np.random.randint(low=50, high=100), capital_or_numeric], dtype=np.uint16)
+    return firstletter_capital_or_numeric
+
 # Generate fake data
 def generateSample(complexity=COMPLEXITY):
     '''Complexity:
@@ -131,10 +173,10 @@ def generateSample(complexity=COMPLEXITY):
     size_colBlock = 80
     img_shape = (row_blockCount * size_rowBlock, col_blockCount * size_colBlock)
     
-    separator_row_size = size_rowBlock // 4
+    separator_row_size = size_rowBlock // 8
     separator_row_location = (size_rowBlock - separator_row_size) // 2
 
-    separator_col_size = size_colBlock // 7
+    separator_col_size = size_colBlock // 12
     separator_col_location = ((size_colBlock // separator_col_size) - 2) * separator_col_size
 
     row_options = {
@@ -198,6 +240,14 @@ def generateSample(complexity=COMPLEXITY):
     img = img_base + rowContribution
     img = np.minimum(img, colContribution)
     img = np.clip(img, a_min=0, a_max=1)
+    _, img_cv = cv.threshold((img*255).astype(np.uint8), THRESHOLD_GRAY, 255, THRESHOLD_METHOD)
+    
+    name = str(uuid4())[:16]
+    img = img_cv.astype(PRECISION)/255
+
+    # t = (img*255).astype(np.uint8)
+    # cv.imshow('orig', )
+    #cv.imshow('thresh', img_cv)
 
     # Combine | Ground Truth
     gt = {}
@@ -207,34 +257,75 @@ def generateSample(complexity=COMPLEXITY):
     # Extract features
     # Features | Visual
     features = {}
-    features['row_absDiff'] = np.asarray([np.absolute(np.diff(row)).mean() for row in img])
+    features['row_absDiff'] = (np.asarray([np.absolute(np.diff(row)).mean() for row in img]))
     features['row_avg'] = np.asarray([np.mean(row) for row in img])
     
     features['col_absDiff'] =   np.asarray([np.absolute(np.diff(col)).mean() for col in img.T])
     features['col_avg'] = np.asarray([np.mean(col) for col in img.T])
 
+    row_spell_lengths = [getSpellLengths(row) for row in img]
+    features['row_spell_mean'] = [np.mean(row_spell_length) for row_spell_length in row_spell_lengths]
+    features['row_spell_sd'] = [np.std(row_spell_length) for row_spell_length in row_spell_lengths]
+
+    col_spell_lengths = [getSpellLengths(col) for col in img.T]
+    features['col_spell_mean'] = [np.mean(col_spell_length) for col_spell_length in col_spell_lengths]
+    features['col_spell_sd'] = [np.std(col_spell_length) for col_spell_length in col_spell_lengths]
+
     # Features | Text
-    img_ocrReady = cv.cvtColor(src=(img*255).astype(np.uint8), code=cv.COLOR_GRAY2RGB)
-    import pytesseract
-    df = pytesseract.image_to_data(image=img_ocrReady, lang='eng', config=r'--psm 3', output_type=pytesseract.Output.DATAFRAME)
-    df = df.loc[(df.level == 5) & (df.conf > 0.3)]
-    df['text'] = df['text'].str.replace('[^a-zA-Z0-9]', '', regex=True)
-    df = df.loc[df.text.str.len() >= 3]
-    ...     # save bbox file
+    if TEXT_THROUGH_OCR:
+        # Features | Text | Prepare image for OCR
+        img_ocr = img_cv.copy()
     
+        # Features | Text | OCR
+        df = pytesseract.image_to_data(image=img_ocr, lang='eng', config=r'--psm 4 --oem 3', output_type=pytesseract.Output.DATAFRAME)
+        df = df.loc[(df.level == 5) & (df.conf > 40), ['left', 'top', 'width', 'height', 'conf', 'text']]
+        if len(df):
+            df['text'] = df['text'].str.replace('[^a-zA-Z0-9]', '', regex=True)
+            df = df.loc[df.text.str.len() >= 2]
+            df['right'] = df['left'] + df['width']
+            df['bottom'] = df['top'] + df['height']
+            df['conf'] = df['conf'].astype(int)
+            df['capital_or_number'] = (df['text'].str[0].str.isupper() | df['text'].str[0].str.isdigit())*1
+
+            if SAVE_ANNOTATED_TEXT:
+                img_annot = img_cv.copy()
+                for idx, row in df.iterrows():
+                    cv.rectangle(img=img_annot, pt1=(row['left'], row['top']), pt2=(row['right'], row['bottom']), color=20, thickness=2)
+
+                pathImage_annotated = str(pathAll /'images_text' / f'{name}.jpg')
+                cv.imwrite(filename=pathImage_annotated, img=img_annot)
+
+            # Features | Text | Convert to feature
+            df = df.astype({col: int for col in ['left', 'right', 'bottom', 'top', 'capital_or_number']})
+            features['firstletter_capital_or_numeric'] = df[['left', 'top', 'right', 'bottom', 'conf', 'capital_or_number']].to_numpy()
+        else:
+            features['firstletter_capital_or_numeric'] = np.array([[]])
+    else:
+        features['firstletter_capital_or_numeric'] = np.array([generateTextFeature(idx, separatorType, row_options=row_options) for idx, separatorType in enumerate(row_separatorTypes)])
+        if SAVE_ANNOTATED_TEXT:
+            img_annot = img_cv.copy()
+            for textFeatureArray in features['firstletter_capital_or_numeric']:
+                color = 40 if textFeatureArray[-1] == 0 else 160
+                cv.rectangle(img=img_annot, pt1=(textFeatureArray[0], textFeatureArray[1]), pt2=(textFeatureArray[2], textFeatureArray[3]), color=color, thickness=2)
+
+            pathImage_annotated = str(pathAll /'images_text' / f'{name}.jpg')
+            cv.imwrite(filename=pathImage_annotated, img=img_annot)
+
+
     # Save
-    name = str(uuid4())
     imagePath = str(pathAll /'images' / f'{name}.jpg')
-    cv.imwrite(filename=str(pathAll /'images' / f'{name}.jpg'), img=img*255)
+    cv.imwrite(filename=imagePath, img=img_cv)
 
     with open(pathAll / 'labels' / f'{name}.json', 'w') as groundTruthFile:
         json.dump(gt, groundTruthFile, cls=NumpyEncoder)
     with open(pathAll / 'features' / f'{name}.json', 'w') as featureFile:
         json.dump(features, featureFile, cls=NumpyEncoder)
 
-
-for i in tqdm(range(120), desc=f"Generating fake images of complexity {COMPLEXITY}"):
-    generateSample()
+if PARALLEL:
+    _ = Parallel(n_jobs=8, backend='loky', verbose=6)(delayed(generateSample)() for i in range(120))
+else:
+    for i in tqdm(range(120), desc=f"Generating fake images of complexity {COMPLEXITY}"):
+        generateSample()
 
 
 # Split into train/val/test
