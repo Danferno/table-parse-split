@@ -88,6 +88,23 @@ def getSpellLengths(inarray):
             z = np.diff(np.append(-1, i)) / n        # run lengths
             return z
 
+def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1):
+    items = [os.path.splitext(entry.name)[0] for entry in os.scandir(pathIn / 'images')]
+    random.shuffle(items)
+
+    dataSplit = {}
+    dataSplit['train'], dataSplit['val'], dataSplit['test'] = np.split(items, indices_or_sections=[int(len(items)*trainRatio), int(len(items)*(trainRatio+valRatio))])
+
+    for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
+        destPath = pathIn.parent / subgroup
+        os.makedirs(destPath / 'images', exist_ok=True); os.makedirs(destPath / 'labels', exist_ok=True); os.makedirs(destPath / 'features', exist_ok=True)
+
+        for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
+            _ = shutil.copyfile(src=pathIn / 'images'   / f'{item}.jpg',  dst=destPath / 'images' / f'{item}.jpg')
+            _ = shutil.copyfile(src=pathIn / 'labels'   / f'{item}.json', dst=destPath / 'labels' / f'{item}.json')
+            _ = shutil.copyfile(src=pathIn / 'features' / f'{item}.json', dst=destPath / 'features' / f'{item}.json')
+
+
 # Make folders
 replaceDirs(pathOut)
 replaceDirs(pathAll)
@@ -336,28 +353,14 @@ def generateSample(complexity=COMPLEXITY):
     with open(pathAll / 'features' / f'{name}.json', 'w') as featureFile:
         json.dump(features, featureFile, cls=NumpyEncoder)
 
-if PARALLEL:
-    _ = Parallel(n_jobs=8, backend='loky', verbose=6)(delayed(generateSample)() for i in range(SAMPLE_SIZE))
-else:
-    for i in tqdm(range(SAMPLE_SIZE), desc=f"Generating fake images of complexity {COMPLEXITY}"):
-        generateSample()
+if __name__ == '__main__':
+    if PARALLEL:
+        _ = Parallel(n_jobs=8, backend='loky', verbose=6)(delayed(generateSample)() for i in range(SAMPLE_SIZE))
+    else:
+        for i in tqdm(range(SAMPLE_SIZE), desc=f"Generating fake images of complexity {COMPLEXITY}"):
+            generateSample()
+    # Split into train/val/test
+    splitData()
 
 
-# Split into train/val/test
-def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1):
-    items = [os.path.splitext(entry.name)[0] for entry in os.scandir(pathIn / 'images')]
-    random.shuffle(items)
 
-    dataSplit = {}
-    dataSplit['train'], dataSplit['val'], dataSplit['test'] = np.split(items, indices_or_sections=[int(len(items)*trainRatio), int(len(items)*(trainRatio+valRatio))])
-
-    for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
-        destPath = pathIn.parent / subgroup
-        os.makedirs(destPath / 'images'); os.makedirs(destPath / 'labels'); os.makedirs(destPath / 'features')
-
-        for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
-            _ = shutil.copyfile(src=pathIn / 'images'   / f'{item}.jpg',  dst=destPath / 'images' / f'{item}.jpg')
-            _ = shutil.copyfile(src=pathIn / 'labels'   / f'{item}.json', dst=destPath / 'labels' / f'{item}.json')
-            _ = shutil.copyfile(src=pathIn / 'features' / f'{item}.json', dst=destPath / 'features' / f'{item}.json')
-
-splitData()

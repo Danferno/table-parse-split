@@ -18,11 +18,15 @@ from collections import namedtuple, OrderedDict
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 COMPLEXITY = 4
-BATCH_SIZE = 2
+DATA_TYPE = 'real'
+BATCH_SIZE = 1
 LOSS_TYPES = ['row', 'col']
 TARGET_MAX_LUMINOSITY = 60
 PREDS_MAX_LUMINOSITY = TARGET_MAX_LUMINOSITY * 2
 EMPTY_LUMINOSITY = 0
+
+# Model parameters
+HIDDEN_SIZES = [30, 10]
 
 # Derived constants
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -35,7 +39,7 @@ def replaceDirs(path):
     except FileExistsError:
         shutil.rmtree(path)
         os.makedirs(path)
-pathData = PATH_ROOT / 'data' / f'fake_{COMPLEXITY}'
+pathData = PATH_ROOT / 'data' / f'{DATA_TYPE}_{COMPLEXITY}'
 pathLogs = PATH_ROOT / 'torchlogs'
 replaceDirs(pathData / 'val_annotated')
 
@@ -178,8 +182,7 @@ class TabliterModel(nn.Module):
         # Output
         return Output(row=row_probs, col=col_probs)
 
-model = TabliterModel()
-#model = torch.compile(model=model, mode='reduce-overhead')
+model = TabliterModel(hidden_sizes=HIDDEN_SIZES)
 sample = next(iter(dataloader_train))
 logits = model(sample)
 
@@ -239,8 +242,8 @@ def calculateLoss(batch, preds, lossFunctions:dict, calculateCorrect=False):
 
 
 # Train
-lr = 9e-2
-epochs = 30
+lr = 0.5
+epochs = 40
 lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
                  'col': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
@@ -361,8 +364,3 @@ def count_parameters(model):
     print(f"Total Trainable Params: {total_params}")
     return total_params
 count_parameters(model=model)
-
-# Show weights
-# for name, param in model.named_parameters():
-#     print(name, param.data, param.requires_grad)
-...

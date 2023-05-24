@@ -12,10 +12,13 @@ import numpy as np
 import cv2 as cv
 import json
 from lxml import etree
+import pickle
 
 # Constants
 DEBUG = False
 PARALLEL = True
+SEPARATOR_TYPE = 'wide'
+COMPLEXITY_SUFFIX = 4
 
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA_TABLEDETECT = Path(r"F:\ml-parsing-project\data")
@@ -29,13 +32,15 @@ LUMINOSITY_FILLER = 255
 
 # Derived paths
 pathLabels_tabledetect_in = PATH_DATA_TABLEDETECT / 'fiverDetect1_14-04-23_williamsmith' / 'labels'
-pathLabels_tablesplit = PATH_ROOT / 'data' / 'labels' / 'wide'
+pathLabels_tablesplit = PATH_ROOT / 'data' / 'labels' / SEPARATOR_TYPE
 pathPdfs_in = PATH_DATA_PDFS / '2023-03-31'  / 'samples_missing_pdfFiles'
 
 pathLabels_tabledetect_local = PATH_ROOT / 'data' / 'labels_tabledetect'
 pathPdfs_local = PATH_ROOT / 'data' / 'pdfs'
 
-pathOut = PATH_ROOT / 'data' / 'real_4'
+pathWords = PATH_ROOT / 'data' / 'words'
+
+pathOut = PATH_ROOT / 'data' / f'real_{COMPLEXITY_SUFFIX}'
 pathOut_all = pathOut / 'all'
 
 def replaceDirs(path):
@@ -48,7 +53,8 @@ def replaceDirs(path):
 os.makedirs(pathPdfs_local, exist_ok=True)
 os.makedirs(pathLabels_tabledetect_local, exist_ok=True)
 os.makedirs(pathOut, exist_ok=True)
-replaceDirs(pathOut_all)
+os.makedirs(pathOut_all, exist_ok=True)
+os.makedirs(pathWords, exist_ok=True)
 replaceDirs(pathOut_all / 'images')
 replaceDirs(pathOut_all / 'labels')
 replaceDirs(pathOut_all / 'features')
@@ -79,6 +85,46 @@ tabledetect_labelFiles_byPdf = defaultdict(list)
 for tabledetect_labelFile in tabledetect_labelFiles:
     pdfName = tabledetect_labelFile.name.split('-p')[0] + '.pdf'
     tabledetect_labelFiles_byPdf[pdfName].append(tabledetect_labelFile.name)
+
+# Gather | words per page
+def pdf_to_words(labelFiles_byPdf_dict):
+    # Parse dict
+    pdfName, labelNames = labelFiles_byPdf_dict
+    pageNumbers = [int(labelName.split('-p')[1].split('.')[0].replace('p', ''))-1 for labelName in labelNames]
+
+    # Open pdf
+    pdfPath = pathPdfs_local / pdfName
+    doc:fitz.Document = fitz.open(pdfPath)
+
+    # Get words from appropriate pages
+    for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL):
+        # Get words from page | Load page
+        pageNumber = pageNumbers[pageIteration]
+        page:fitz.Page = doc.load_page(page_id=pageNumber)
+        outPath = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pkl'
+        if os.path.exists(outPath):
+            continue
+
+        # Get words from page | Extract directly from PDF
+        textPage = page.get_textpage(flags=fitz.TEXTFLAGS_WORDS)
+        words = textPage.extractWORDS()
+        if len(words) == 0:
+            # Get words from page | OCR if necessary
+            textPage = page.get_textpage_ocr(flags=fitz.TEXTFLAGS_WORDS, language='nld+fra+deu+eng', dpi=300)
+            words = textPage.extractWORDS()
+
+        # Get words from page | Save
+        with open(outPath, 'wb') as file:
+            pickle.dump(obj=words, file=file)
+
+
+if PARALLEL:
+    results = Parallel(n_jobs=-1, backend='loky', verbose=9)(delayed(pdf_to_words)(labelFiles_byPdf_dict) for labelFiles_byPdf_dict in tabledetect_labelFiles_byPdf.items())
+else:
+    for labelFiles_byPdf_dict in tqdm(tabledetect_labelFiles_byPdf.items(), desc='Gathering words'):        # pdfName = list(tabledetect_labelFiles_byPdf.keys())[0]
+        result = pdf_to_words(labelFiles_byPdf_dict)
+
+
 
 # Convert
 # Convert | tablesplit labels > pdf coordinates
@@ -175,7 +221,7 @@ def vocLabels_to_groundTruth(pathLabel, img):
             gt_col[separator[0]:separator[1]+1] = 1
     else:
         gt_row = np.zeros(shape=img.shape[0], dtype=np.uint8)
-        gt_col = np.zeros(shape=img.shape[0], dtype=np.uint8)
+        gt_col = np.zeros(shape=img.shape[1], dtype=np.uint8)
     
     gt = {}
     gt['row'] = gt_row
@@ -200,11 +246,9 @@ def processPdf(pdfName):
         fitzBoxes = yoloFile_to_fitzBox(yoloPath=yoloPath, targetPdfSize=page.mediabox_size)
 
         # Get text on page
-        textPage = page.get_textpage(flags=fitz.TEXTFLAGS_WORDS)
-        words = textPage.extractWORDS()
-        if len(words) == 0:
-            textPage = page.get_textpage_ocr(flags=fitz.TEXTFLAGS_WORDS, language='nld+fra+deu+eng', dpi=300)
-            words = textPage.extractWORDS()
+        pathWordsFile = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pkl'
+        with open(pathWordsFile, 'rb') as file:
+            words = pickle.load(file)
 
         for tableIteration, _ in enumerate(fitzBoxes):
             tables += 1
@@ -269,7 +313,6 @@ def processPdf(pdfName):
             # Extract ground truths
             gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img)
 
-
             # Save
             # Save | Visual
             # Save | Visual | Image
@@ -312,10 +355,13 @@ def processPdf(pdfName):
             with open(pathOut_labels, 'w') as labelFile:
                 json.dump(gt, labelFile, cls=NumpyEncoder)
     
-    return tables, errors
+    return (tables, errors)
 
 if PARALLEL:
-    results = Parallel(n_jobs=-1, backend='loky', verbose=8)(delayed(processPdf)(pdfName) for pdfName in tabledetect_labelFiles_byPdf)
+    results = Parallel(n_jobs=-1, backend='loky', verbose=9)(delayed(processPdf)(pdfName) for pdfName in tabledetect_labelFiles_byPdf)
+    tables, errors = zip(*results)
+    tables = sum(tables)
+    errors = sum(errors)
 
 else:
     tables, errors = 0,0
@@ -325,8 +371,8 @@ else:
         errors += errors_pdf
     
 
-print(f'Tables parsed: {tables}.\nErrors: {errors}')
+print(f'Tables parsed: {tables}\nErrors: {errors} ({(errors/tables*100):.00f}%)')
 
 # Split into train/val/test
-from .generateFakeData import splitData
+from generateFakeData import splitData
 splitData(pathIn=pathOut_all)
