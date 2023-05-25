@@ -28,8 +28,8 @@ EMPTY_LUMINOSITY = 0
 
 # Model parameters
 EPOCHS = 10
-HIDDEN_SIZES = [6, 4]
-CONV_LETTER_KERNEL = [15//2, 30]
+HIDDEN_SIZES = [10, 5]
+CONV_LETTER_KERNEL = [3, 3]
 CONV_LETTER_CHANNELS = 2
 CONV_SEQUENCE_KERNEL = [60, 30]
 CONV_SEQUENCE_CHANNELS = 2
@@ -180,7 +180,28 @@ class TabliterModel(nn.Module):
         self.layer_avg_row = nn.AdaptiveAvgPool2d(output_size=(None, 1))
         self.layer_avg_col = nn.AdaptiveAvgPool2d(output_size=(1, None))
 
+        self.layer_conv_preds_row = nn.Sequential(OrderedDict([
+            ('conv1', nn.Conv1d(in_channels=1, out_channels=1, kernel_size=4, padding='same', padding_mode='replicate')),
+            ('relu1', nn.PReLU())
+        ]))
+        self.layer_conv_preds_col = nn.Sequential(OrderedDict([
+            ('conv1', nn.Conv1d(in_channels=1, out_channels=1, kernel_size=4, padding='same', padding_mode='replicate')),
+            ('relu1', nn.PReLU())
+        ]))
+        
+        self.layer_fc_row = nn.Sequential(OrderedDict([
+            ('lin1', nn.Linear(in_features=2, out_features=3)),
+            ('relu1', nn.PReLU()),
+            ('lin2', nn.Linear(in_features=3, out_features=1))
+        ]))
+        self.layer_fc_col = nn.Sequential(OrderedDict([
+            ('lin1', nn.Linear(in_features=2, out_features=3)),
+            ('relu1', nn.PReLU()),
+            ('lin2', nn.Linear(in_features=3, out_features=1))
+        ]))
+
         self.layer_logit = nn.Sigmoid()
+
     
     def addLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
         sequence = nn.Sequential(OrderedDict([
@@ -211,8 +232,11 @@ class TabliterModel(nn.Module):
         row_inputs = torch.cat([row_avg_inputs, row_absDiff_inputs, row_spell_mean_inputs, row_spell_sd_inputs, row_firstletter_capitalOrNumeric_inputs, row_conv_values], dim=-1)
 
         # Row | Layers
-        row_intermediate_values = self.layer_linear_row(row_inputs)
-        row_probs = self.layer_logit(row_intermediate_values)
+        row_direct_preds = self.layer_linear_row(row_inputs)
+        row_convolved_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, 1)
+
+        row_preds = self.layer_fc_row(torch.cat([row_direct_preds, row_convolved_preds], dim=-1))
+        row_probs = self.layer_logit(row_preds)
 
         # Col
         col_avg_inputs = sample['features']['col_avg']
@@ -223,8 +247,11 @@ class TabliterModel(nn.Module):
         col_inputs = torch.cat([col_avg_inputs, col_absDiff_inputs, col_spell_mean_inputs, col_spell_sd_inputs, col_conv_values], dim=-1)
 
         # Col | Layers
-        col_intermediate_values = self.layer_linear_col(col_inputs)
-        col_probs = self.layer_logit(col_intermediate_values)
+        col_direct_preds = self.layer_linear_col(col_inputs)
+        col_convolved_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, 1)
+
+        col_preds = self.layer_fc_col(torch.cat([col_direct_preds, col_convolved_preds], dim=-1))
+        col_probs = self.layer_logit(col_preds)
 
         # Output
         return Output(row=row_probs, col=col_probs)
@@ -294,7 +321,7 @@ lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row
                  'col': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, mode='min', verbose=True)
-scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.3, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.2, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
 
 def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4):
     print('Train')
@@ -340,6 +367,7 @@ def val_loop(dataloader, model, lossFunctions):
     
     return val_loss
 
+print(model)
 for t in range(EPOCHS):
     print(f"\nEpoch {t+1} of {EPOCHS}. Learning rate: {scheduler.get_last_lr()[0]:03f}")
     train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
