@@ -4,5 +4,9 @@
 			"path": "."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"python.analysis.inlayHints.callArgumentNames": false,
+		"python.analysis.logLevel": "Trace",
+		"editor.wordWrap": "on"
+	}
 }
