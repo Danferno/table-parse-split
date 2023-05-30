@@ -7,13 +7,16 @@ import shutil
 from collections import defaultdict
 import fitz
 import pandas as pd
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 import cv2 as cv
 import json
 from lxml import etree
 import pickle
+import pytesseract
+import easyocr
+from collections import namedtuple
 
 np.seterr(all='raise')
 
@@ -28,8 +31,16 @@ PATH_DATA_TABLEDETECT = Path(r"F:\ml-parsing-project\data")
 PATH_DATA_PDFS = Path(r"F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted")
 DPI_PYMUPDF = 72
 DPI_TARGET = 150
+DPI_OCR = 300
 PADDING = 40
 PRECISION = np.float32
+
+LANGUAGES = 'nld+fra+deu+eng'
+OCR_TYPES = ['tesseract_fitz', 'tesseract_fast', 'tesseract_legacy', 'easyocr']
+CONFIG_PYTESSERACT_FAST = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_fast" --oem 3 --psm 11'
+CONFIG_PYTESSERACT_LEGACY = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'
+TRANSPARANCY = int(0.25*255)
+FONT_LABEL = ImageFont.truetype('arial.ttf', size=40)
 
 WINDOW_EMPTYROW_RELATIVE_FACTOR = 5
 WINDOW_EMPTYROW_WINDOW_SIZE = 5
@@ -93,7 +104,20 @@ for tabledetect_labelFile in tabledetect_labelFiles:
     tabledetect_labelFiles_byPdf[pdfName].append(tabledetect_labelFile.name)
 
 # Gather | words per page
-def pdf_to_words(labelFiles_byPdf_dict):
+BoxIntersect = namedtuple('BoxIntersect', field_names=['left', 'right', 'top', 'bottom', 'intersect', 'Index'])
+def boxes_intersect(box, box_target):
+    overlap_x = ((box.left >= box_target.left) & (box.left < box_target.right)) | ((box.right >= box_target.left) & (box.left < box_target.left))
+    overlap_y = ((box.top >= box_target.top) & (box.top < box_target.bottom)) | ((box.bottom >= box_target.top) & (box.top < box_target.top))
+
+    return all([overlap_x, overlap_y])
+def box_intersects_boxList(box, box_targets):
+    overlap = any([boxes_intersect(box, box_target=box_target) for box_target in box_targets])
+    return overlap
+    
+def pdf_to_words(labelFiles_byPdf_dict, reader=None):
+    # Start easyocr reader
+    if not reader:
+        reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
     # Parse dict
     pdfName, labelNames = labelFiles_byPdf_dict
     pageNumbers = [int(labelName.split('-p')[1].split('.')[0].replace('p', ''))-1 for labelName in labelNames]
@@ -107,7 +131,7 @@ def pdf_to_words(labelFiles_byPdf_dict):
         # Get words from page | Load page
         pageNumber = pageNumbers[pageIteration]
         page:fitz.Page = doc.load_page(page_id=pageNumber)
-        outPath = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pkl'
+        outPath = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pq'
         if os.path.exists(outPath):
             continue
 
@@ -116,19 +140,100 @@ def pdf_to_words(labelFiles_byPdf_dict):
         words = textPage.extractWORDS()
         if len(words) == 0:
             # Get words from page | OCR if necessary
+            textDfs = []
+
+            # Get words from page | OCR | From PDF | Fitz
             textPage = page.get_textpage_ocr(flags=fitz.TEXTFLAGS_WORDS, language='nld+fra+deu+eng', dpi=300)
             words = textPage.extractWORDS()
+            wordsDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(ocrLabel='tesseract-fitz')
+            wordsDf[['left', 'right', 'top', 'bottom']] = wordsDf[['left', 'right', 'top', 'bottom']] * (DPI_OCR / DPI_PYMUPDF)
+            textDfs.append(wordsDf)
 
+            # Get words from page | OCR | From Image
+            page_image = page.get_pixmap(dpi=DPI_OCR, alpha=False, colorspace=fitz.csGRAY)
+            img = Image.frombytes(mode='L', size=(page_image.width, page_image.height), data=page_image.samples)
+
+            # Get words from page | OCR | From Image | PyTesseract Fast
+            text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_FAST, output_type=pytesseract.Output.DATAFRAME)
+            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'block_num', 'line_num', 'word_num', 'conf']].rename(columns={'line_num':'lineno', 'block_num':'blockno', 'word_num':'wordno'}).assign(ocrLabel='tesseract-fast')
+            wordsDf['right'] = wordsDf['left'] + wordsDf['width']
+            wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
+            wordsDf = wordsDf.drop(columns=['width', 'height'])
+            textDfs.append(wordsDf)
+            
+            # Get words from page | OCR | From Image | PyTesseract Legacy
+            text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_LEGACY, output_type=pytesseract.Output.DATAFRAME)
+            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'block_num', 'line_num', 'word_num', 'conf']].rename(columns={'line_num':'lineno', 'block_num':'blockno', 'word_num':'wordno'}).assign(ocrLabel='tesseract-legacy')
+            wordsDf['right'] = wordsDf['left'] + wordsDf['width']
+            wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
+            wordsDf = wordsDf.drop(columns=['width', 'height'])
+            textDfs.append(wordsDf)
+
+            # Get words from page | OCR | From Image | EasyOCR
+            img_array = np.array(img)
+            text = reader.readtext(image=img_array, batch_size=50, detail=1)
+            text = [{'left': el[0][0][0], 'right': el[0][1][0], 'top': el[0][0][1], 'bottom': el[0][2][1], 'text': el[1], 'conf': el[2]*100} for el in text]
+            text:pd.DataFrame = pd.DataFrame.from_records(text).assign(ocrLabel="easyocr")
+
+            wordsDf = text.loc[text['conf'] > 30]
+            textDfs.append(wordsDf)
+
+            # Combine
+            df = pd.concat(textDfs)
+            df[['left', 'right', 'top', 'bottom']] = df[['left', 'right', 'top', 'bottom']].round(0).astype(int)
+            df['text_sparse'] = df['text'].str.replace('[^a-zA-Z0-9À-ÿ.\(\)_\-\+ ]', '', regex=True)
+            df = df.loc[df['text_sparse'].str.len() >= 1].drop(columns='text_sparse').reset_index(drop=True)
+
+            # Detect intersection
+            easyocr_boxes = set(df.loc[df['ocrLabel'] == 'easyocr', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+            other_boxes   = set(df.loc[df['ocrLabel'] != 'easyocr', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+
+            other_boxes = [BoxIntersect(left=otherBox.left, right=otherBox.right, top=otherBox.top, bottom=otherBox.bottom, intersect=box_intersects_boxList(box=otherBox, box_targets=easyocr_boxes), Index=otherBox.Index) for otherBox in other_boxes]
+
+            # Combine words
+            extraBoxes = [box for box in other_boxes if not box.intersect ]
+            extraBoxes = [BoxIntersect(left=extraBox.left, right=extraBox.right, top=extraBox.top, bottom=extraBox.bottom, intersect=box_intersects_boxList(box=extraBox, box_targets=extraBoxes), Index=extraBox.Index) for extraBox in extraBoxes]
+            indexesToKeep = [box.Index for box in easyocr_boxes.union(set(extraBoxes))]
+            textDf = df.iloc[indexesToKeep]
+
+        else:
+            textDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(ocrLabel='pdf')
+            textDf['text_sparse_len'] = textDf['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\)_ ]', '', regex=True).str.len()
+            textDf = textDf.loc[(textDf['text_sparse_len'] >= 2) | (textDf['text'] == '.')].drop(columns='text_sparse_len').reset_index(drop=True)
+            textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']] * (DPI_OCR / DPI_PYMUPDF)
+        
         # Get words from page | Save
-        with open(outPath, 'wb') as file:
-            pickle.dump(obj=words, file=file)
+        textDf.to_parquet(outPath)
+
+        # Visualise words
+        page_image = page.get_pixmap(dpi=DPI_OCR, alpha=False, colorspace=fitz.csGRAY)
+        img = Image.frombytes(mode='L', size=(page_image.width, page_image.height), data=page_image.samples)
+        img_overlay = Image.new('RGBA', img.size, (0,0,0,0))
+        img_annot = ImageDraw.Draw(img_overlay, mode='RGBA')
+        colors = {
+            'easyocr': (255,228,181, int(0.6*255)),
+            'pdf': (255, 162, 0, int(0.5*255)),
+            'other': (0, 128, 0, int(0.5*255))
+        }
+    
+        for box in textDf.itertuples('box'):      # box = intersecting_boxes[0]
+            color = colors[box.ocrLabel] if box.ocrLabel in ['easyocr', 'pdf'] else colors['other']
+            img_annot.rectangle(xy=(box.left, box.top, box.right, box.bottom), fill=color, width=4, outline=(255,255,255,TRANSPARANCY))
+    
+        img_annot.text(xy=(img.size[0] // 4 * 1, img.size[1] // 15 * 14), text='easyocr', anchor='ld', fill=colors['easyocr'], font=FONT_LABEL)
+        img_annot.text(xy=(img.size[0] // 4 * 2, img.size[1] // 15 * 14), text='pdf', anchor='ld', fill=colors['pdf'], font=FONT_LABEL)
+        img_annot.text(xy=(img.size[0] // 4 * 3, img.size[1] // 15 * 14), text='tesseract', anchor='ld', fill=colors['other'], font=FONT_LABEL)
+
+        img = Image.alpha_composite(img.convert('RGBA'), img_overlay)
+        img.convert('RGB').save(f'{os.path.splitext(outPath)[0]}.png')
 
 
 if PARALLEL:
-    results = Parallel(n_jobs=-1, backend='loky', verbose=9)(delayed(pdf_to_words)(labelFiles_byPdf_dict) for labelFiles_byPdf_dict in tabledetect_labelFiles_byPdf.items())
+    results = Parallel(n_jobs=6, backend='loky', verbose=9)(delayed(pdf_to_words)(labelFiles_byPdf_dict) for labelFiles_byPdf_dict in tabledetect_labelFiles_byPdf.items())
 else:
-    for labelFiles_byPdf_dict in tqdm(tabledetect_labelFiles_byPdf.items(), desc='Gathering words'):        # pdfName = list(tabledetect_labelFiles_byPdf.keys())[0]
-        result = pdf_to_words(labelFiles_byPdf_dict)
+    reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
+    for labelFiles_byPdf_dict in tqdm(tabledetect_labelFiles_byPdf.items(), desc='Gathering words'):
+        result = pdf_to_words(labelFiles_byPdf_dict, reader=reader)
 
 
 
@@ -359,7 +464,6 @@ def processPdf(pdfName):
             textDf = textDf.loc[(textDf['top'] >= tableRect.y0) & (textDf['left'] >= tableRect.x0) & (textDf['bottom'] <= tableRect.y1) & (textDf['right'] <= tableRect.x1)]        # clip to table
 
             # Process text | Reduce to words with 2 alphanumeric characters
-            textDf['text'] = textDf['text'].str.replace('[^a-zA-Z0-9À-ÿ]', '', regex=True)
             textDf = textDf.loc[textDf['text'].str.len() >= 2]
 
             # Process text | Convert to padded table image pixel coordinates

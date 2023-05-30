@@ -20,7 +20,7 @@ import easyocr
 from collections import namedtuple
 
 # Constants
-GENERATE_WORDS = False
+GENERATE_WORDS = True
 VISUALIZE_WORDS = False
 COMBINE_WORDS = True
 
@@ -149,8 +149,8 @@ if GENERATE_WORDS:
     end_tesseract_pytesseract_fast = time()
     print('Finished pytesseract-fast')
 
-    # Gather words per page | Tesseract | Pytesseract | Fast
-    CONFIG_PYTESSERACT_FAST = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'
+    # Gather words per page | Tesseract | Pytesseract | Legacy
+    CONFIG_PYTESSERACT_LEGACY = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'
     def pdf_to_words_tesseract_pytesseract_legacy(labelFiles_byPdf_dict):
         # Parse dict
         pdfName, labelNames = labelFiles_byPdf_dict
@@ -177,7 +177,7 @@ if GENERATE_WORDS:
                 img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
                 img.paste(img_tight, (PADDING, PADDING)) 
 
-                text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_FAST, output_type=pytesseract.Output.DATAFRAME)
+                text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_LEGACY, output_type=pytesseract.Output.DATAFRAME)
                 wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'block_num', 'line_num', 'word_num', 'conf']]
                 wordsDf['right'] = wordsDf['left'] + wordsDf['width']
                 wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
@@ -223,7 +223,7 @@ if GENERATE_WORDS:
                 img.paste(img_tight, (PADDING, PADDING)) 
                 img_array = np.array(img)
 
-                text = reader.readtext(image=img_array, batch_size=10, detail=1)
+                text = reader.readtext(image=img_array, batch_size=50, detail=1)
                 text = [{'left': el[0][0][0], 'right': el[0][1][0], 'top': el[0][0][1], 'bottom': el[0][2][1], 'text': el[1], 'conf': el[2]*100} for el in text]
                 text:pd.DataFrame = pd.DataFrame.from_records(text)
 
@@ -232,8 +232,6 @@ if GENERATE_WORDS:
             else:
                 continue
 
-    reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True)       # download should not be part of timings
-    del reader
     start_easyocr = time()
     reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True)
     for labelFiles_byPdf_dict in tqdm(tabledetect_labelFiles_byPdf.items(), desc='Gathering words'):        # labelFiles_byPdf_dict = list(tabledetect_labelFiles_byPdf.items())[1]
