@@ -12,3 +12,6 @@ spanning cell too large
 	2008-46600023-p30_t1_annotated
 	2008-48100204-p41_t0_annotated
 	2008-50300219-p17_t0_annotated
+	
+annotations to check
+	2007-09401401-p9_t2.jpg

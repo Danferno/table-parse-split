@@ -271,8 +271,11 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     
     def index_to_bboxCross(index, mins, maxes):
         return ((mins <= index) & (maxes >=index)).sum()
-    features['row_wordcrosscount'] = np.array([index_to_bboxCross(index=index, mins=top, maxes=bottom) for index in range(img01.shape[0])])
-    features['col_wordcrosscount'] = np.array([index_to_bboxCross(index=index, mins=left, maxes=right) for index in range(img01.shape[1])])
+    features['row_wordsCrossed_count'] = np.array([index_to_bboxCross(index=index, mins=top, maxes=bottom) for index in range(img01.shape[0])])
+    features['col_wordsCrossed_count'] = np.array([index_to_bboxCross(index=index, mins=left, maxes=right) for index in range(img01.shape[1])])
+
+    features['row_wordsCrossed_relToMax'] = features['row_wordsCrossed_count'] / features['row_wordsCrossed_count'].max() if features['row_wordsCrossed_count'].max() != 0 else features['row_wordsCrossed_count']
+    features['col_wordsCrossed_relToMax'] = features['col_wordsCrossed_count'] / features['col_wordsCrossed_count'].max() if features['col_wordsCrossed_count'].max() != 0 else features['col_wordsCrossed_count']
 
     # Return
     return img01, img_cv, features
@@ -407,20 +410,14 @@ def processPdf(pdfName):
 
             # Save | Visual | Image with ground truth and text feature | Text Feature
             # Save | Visual | Image with ground truth and text feature | Text Feature | Words crossed
-            if features['row_wordcrosscount'].max() == 0:
-                wc_row = features['row_wordcrosscount']
-            else:
-                wc_row = features['row_wordcrosscount'] / features['row_wordcrosscount'].max()
+            wc_row = features['row_wordsCrossed_relToMax']
             wc_row = np.expand_dims(wc_row, 1)
             wc_row = (wc_row * 255).astype(np.uint8)
             wc_row = np.broadcast_to(wc_row, shape=[wc_row.shape[0], 40])
             wc_row = np.concatenate([wc_row, np.full(fill_value=LUMINOSITY_FILLER, shape=((img_annot.shape[0] - wc_row.shape[0]), wc_row.shape[1]))], axis=0)
             img_annot = np.concatenate([img_annot, wc_row], axis=1)
 
-            if features['col_wordcrosscount'].max() == 0:
-                wc_col = features['col_wordcrosscount']
-            else:    
-                wc_col = features['col_wordcrosscount'] / features['col_wordcrosscount'].max()
+            wc_col = features['col_wordsCrossed_relToMax']
             wc_col = np.expand_dims(wc_col, 1)
             wc_col = (wc_col * 255).astype(np.uint8)
             wc_col = np.broadcast_to(wc_col, shape=[wc_col.shape[0], 40])

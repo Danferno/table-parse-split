@@ -18,24 +18,30 @@ from collections import namedtuple, OrderedDict
 
 # Constants
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-COMPLEXITY = 4
+SUFFIX = 'wide'
 DATA_TYPE = 'real'
 BATCH_SIZE = 1
+
 LOSS_TYPES = ['row', 'col']
+FEATURE_TYPES = LOSS_TYPES + ['image']
+
 TARGET_MAX_LUMINOSITY = 60
 PREDS_MAX_LUMINOSITY = TARGET_MAX_LUMINOSITY * 2
 EMPTY_LUMINOSITY = 0
 
+COMMON_VARIABLES = ['{}_avg', '{}_absDiff', '{}_spell_mean', '{}_spell_sd', '{}_wordsCrossed_count', '{}_wordsCrossed_relToMax']
+
 # Model parameters
-EPOCHS = 10
-HIDDEN_SIZES = [10, 5]
-CONV_LETTER_KERNEL = [3, 3]
+EPOCHS = 2
+MAX_LR = 0.2
+HIDDEN_SIZES = [8, 3]
+CONV_LETTER_KERNEL = [4, 4]
 CONV_LETTER_CHANNELS = 2
 CONV_SEQUENCE_KERNEL = [60, 30]
 CONV_SEQUENCE_CHANNELS = 2
 
 CONV_FINAL_CHANNELS = CONV_LETTER_CHANNELS
-
+CONV_PREDS_CHANNELS = 2
 
 # Derived constants
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -48,11 +54,15 @@ def replaceDirs(path):
     except FileExistsError:
         shutil.rmtree(path)
         os.makedirs(path)
-pathData = PATH_ROOT / 'data' / f'{DATA_TYPE}_{COMPLEXITY}'
+pathData = PATH_ROOT / 'data' / f'{DATA_TYPE}_{SUFFIX}'
 pathLogs = PATH_ROOT / 'torchlogs'
 replaceDirs(pathData / 'val_annotated')
 
 # Data
+Sample = namedtuple('sample', ['features', 'targets', 'meta'])
+Meta = namedtuple('meta', ['path_image'])
+Targets = namedtuple('target', LOSS_TYPES)
+Features = namedtuple('features', FEATURE_TYPES)
 def move_values_to_gpu(d):
     for _, value in d.items():
         if isinstance(value, dict):
@@ -64,17 +74,13 @@ class TableDataset(Dataset):
     def __init__(self, dir_data,
                     image_format='.jpg',
                     transform_image=None, transform_target=None):
-        # class A:
-        #  pass
-        # self = A()
-
         # Store in self 
         dir_data = Path(dir_data)
         self.dir_images = dir_data / 'images'
         self.dir_features = dir_data / 'features'
         self.dir_labels = dir_data / 'labels'
         self.transform_image = transform_image
-        self.transform_trget = transform_target
+        self.transform_target = transform_target
         self.image_format = image_format
         self.image_size = (600, 400)
 
@@ -100,54 +106,39 @@ class TableDataset(Dataset):
         pathFeatures = str(self.dir_features / f'{self.items[idx]}.json')
 
         # Load sample
-        sample = {}
-        
-        # Load sample | Meta info
-        sample['meta'] = {}
-        sample['meta']['path_image'] = pathImage
-        
+        # Load sample | Meta
+        meta = Meta(path_image=pathImage)
+
         # Load sample | Label
         with open(pathLabel, 'r') as f:
             labelData = json.load(f)
-        sample['labels'] = {}
-        sample['labels']['row'] = Tensor(labelData['row']).unsqueeze(-1)
-        sample['labels']['col'] = Tensor(labelData['col']).unsqueeze(-1)
+        targets = Targets(row=Tensor(labelData['row']).unsqueeze(-1).to(DEVICE),
+                                         col=Tensor(labelData['col']).unsqueeze(-1).to(DEVICE))
     
         # Load sample | Features
         with open(pathFeatures, 'r') as f:
             featuresData = json.load(f)
-        sample['features'] = {}
 
-        # Load sample | Pre-computed | Based on visual
-        sample['features']['row_avg'] = Tensor(featuresData['row_avg']).unsqueeze(-1)
-        sample['features']['col_avg'] = Tensor(featuresData['col_avg']).unsqueeze(-1)
-        sample['features']['row_absDiff'] = Tensor(featuresData['row_absDiff']).unsqueeze(-1)
-        sample['features']['col_absDiff'] = Tensor(featuresData['col_absDiff']).unsqueeze(-1)
+        # Load sample | Features | Rows
+        features_row = torch.cat(tensors=[Tensor(featuresData[common_variable.format('row')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=1)
+        features_row = torch.cat([features_row, Tensor(featuresData['row_firstletter_capitalOrNumeric']).unsqueeze(-1)], dim=1)
 
-        sample['features']['row_spell_mean'] = Tensor(featuresData['row_spell_mean']).unsqueeze(-1)
-        sample['features']['row_spell_sd'] = Tensor(featuresData['row_spell_sd']).unsqueeze(-1)
-        sample['features']['col_spell_mean'] = Tensor(featuresData['col_spell_mean']).unsqueeze(-1)
-        sample['features']['col_spell_sd'] = Tensor(featuresData['col_spell_sd']).unsqueeze(-1)
-
-        # Load sample | Pre-computed | Based on text
-        sample['features']['row_firstletter_capitalOrNumeric'] = Tensor(featuresData['row_firstletter_capitalOrNumeric']).unsqueeze(-1)
-
-        # Load sample | Image (0-1 float)
-        sample['features']['image'] = read_image(pathImage, mode=ImageReadMode.GRAY).to(dtype=torch.float32) / 255
+        # Load sample | Features | Cols
+        features_col = torch.cat(tensors=[Tensor(featuresData[common_variable.format('col')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=1)
+       
+        # Load sample | Features | Image (0-1 float)
+        image = read_image(pathImage, mode=ImageReadMode.GRAY).to(dtype=torch.float32) / 255
 
         # Optional transform
         if self.transform_image:
-            sample['features']['image'] = self.transform_image(sample['features']['image'])
-        if self.transform_trget:
+            image = self.transform_image(image)
+        if self.transform_target:
             for labelType in sample['labels']:
-                sample['labels'][labelType] = self.transform_trget(sample['labels'][labelType])
+                sample['labels'][labelType] = self.transform_target(sample['labels'][labelType])
 
-        # Move everything to GPU
-        for key, value in sample['features'].items():
-            sample['features'][key] = value.to(DEVICE)
-        for key, value in sample['labels'].items():
-            sample['labels'][key] = value.to(DEVICE)
-
+        # Collect in namedtuples
+        features = Features(row=features_row.to(DEVICE), col=features_col.to(DEVICE), image=image.to(DEVICE))
+        sample = Sample(features=features, targets=targets, meta=meta)
 
         # Return sample
         return sample
@@ -169,8 +160,8 @@ class TabliterModel(nn.Module):
         self.hidden_sizes = hidden_sizes
         self.layer_depth = layer_depth
 
-        self.layer_linear_row = self.addLayer(layerType=nn.Linear, in_features=5+CONV_FINAL_CHANNELS, out_features=1)
-        self.layer_linear_col = self.addLayer(layerType=nn.Linear, in_features=4+CONV_FINAL_CHANNELS, out_features=1)
+        self.layer_linear_row = self.addLayer(layerType=nn.Linear, in_features=7+CONV_FINAL_CHANNELS, out_features=1)
+        self.layer_linear_col = self.addLayer(layerType=nn.Linear, in_features=6+CONV_FINAL_CHANNELS, out_features=1)
 
         self.layer_conv = nn.Sequential(OrderedDict([
             ('conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LETTER_CHANNELS, kernel_size=CONV_LETTER_KERNEL, padding='same', padding_mode='replicate')),
@@ -181,21 +172,23 @@ class TabliterModel(nn.Module):
         self.layer_avg_col = nn.AdaptiveAvgPool2d(output_size=(1, None))
 
         self.layer_conv_preds_row = nn.Sequential(OrderedDict([
-            ('conv1', nn.Conv1d(in_channels=1, out_channels=1, kernel_size=4, padding='same', padding_mode='replicate')),
-            ('relu1', nn.PReLU())
+            ('conv1', nn.Conv1d(in_channels=1, out_channels=CONV_PREDS_CHANNELS, kernel_size=4, padding='same', padding_mode='replicate')),
+            ('relu1', nn.PReLU()),
+            ('conv2', nn.Conv1d(in_channels=CONV_PREDS_CHANNELS, out_channels=CONV_PREDS_CHANNELS, kernel_size=16, padding='same', padding_mode='replicate')),
         ]))
         self.layer_conv_preds_col = nn.Sequential(OrderedDict([
-            ('conv1', nn.Conv1d(in_channels=1, out_channels=1, kernel_size=4, padding='same', padding_mode='replicate')),
-            ('relu1', nn.PReLU())
+            ('conv1', nn.Conv1d(in_channels=1, out_channels=CONV_PREDS_CHANNELS, kernel_size=4, padding='same', padding_mode='replicate')),
+            ('relu1', nn.PReLU()),
+            ('conv2', nn.Conv1d(in_channels=CONV_PREDS_CHANNELS, out_channels=CONV_PREDS_CHANNELS, kernel_size=16, padding='same', padding_mode='replicate')),
         ]))
         
         self.layer_fc_row = nn.Sequential(OrderedDict([
-            ('lin1', nn.Linear(in_features=2, out_features=3)),
+            ('lin1', nn.Linear(in_features=1+CONV_PREDS_CHANNELS, out_features=3)),
             ('relu1', nn.PReLU()),
             ('lin2', nn.Linear(in_features=3, out_features=1))
         ]))
         self.layer_fc_col = nn.Sequential(OrderedDict([
-            ('lin1', nn.Linear(in_features=2, out_features=3)),
+            ('lin1', nn.Linear(in_features=1+CONV_PREDS_CHANNELS, out_features=3)),
             ('relu1', nn.PReLU()),
             ('lin2', nn.Linear(in_features=3, out_features=1))
         ]))
@@ -205,50 +198,41 @@ class TabliterModel(nn.Module):
     
     def addLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
         sequence = nn.Sequential(OrderedDict([
-            (f'lin_from{in_features}_to{self.hidden_sizes[0]}', layerType(in_features=in_features, out_features=self.hidden_sizes[0])),
+            (f'lin1_from{in_features}_to{self.hidden_sizes[0]}', layerType(in_features=in_features, out_features=self.hidden_sizes[0])),
             (f'relu_1', activation()),
-            (f'lin_from{self.hidden_sizes[0]}_to{self.hidden_sizes[1]}', layerType(in_features=self.hidden_sizes[0], out_features=self.hidden_sizes[1])),
+            (f'lin2_from{self.hidden_sizes[0]}_to{self.hidden_sizes[1]}', layerType(in_features=self.hidden_sizes[0], out_features=self.hidden_sizes[1])),
             (f'relu_2', activation()),
-            (f'lin_from{self.hidden_sizes[1]}_to{out_features}', layerType(in_features=self.hidden_sizes[1], out_features=out_features))
+            (f'lin3_from{self.hidden_sizes[1]}_to{out_features}', layerType(in_features=self.hidden_sizes[1], out_features=out_features))
         ]))
         return sequence
     
-    def forward(self, sample):
+    def forward(self, features):
+        # Convert tuple to namedtuple
+        if type(features) == type((0,)):
+            features = Features(**{field: features[i] for i, field in enumerate(Features._fields)})
+            
         # Image
-        # Image | Inputs
-        img = sample['features']['image']
-
-        # Image | Convolutional layers
-        img_intermediate_values = self.layer_conv(img)
+        # Image | Convolutional layers based on image
+        img_intermediate_values = self.layer_conv(features.image)
+        row_conv_values = self.layer_avg_row(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS)
+        col_conv_values = self.layer_avg_col(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS)
 
         # Row
-        # Row | Inputs
-        row_avg_inputs = sample['features']['row_avg']
-        row_absDiff_inputs = sample['features']['row_absDiff']
-        row_spell_mean_inputs = sample['features']['row_spell_mean']
-        row_spell_sd_inputs = sample['features']['row_spell_sd']
-        row_firstletter_capitalOrNumeric_inputs = sample['features']['row_firstletter_capitalOrNumeric']
-        row_conv_values = self.layer_avg_row(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS)
-        row_inputs = torch.cat([row_avg_inputs, row_absDiff_inputs, row_spell_mean_inputs, row_spell_sd_inputs, row_firstletter_capitalOrNumeric_inputs, row_conv_values], dim=-1)
+        row_inputs = torch.cat([features.row, row_conv_values], dim=-1)
 
         # Row | Layers
         row_direct_preds = self.layer_linear_row(row_inputs)
-        row_convolved_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, 1)
+        row_convolved_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, CONV_PREDS_CHANNELS)
 
         row_preds = self.layer_fc_row(torch.cat([row_direct_preds, row_convolved_preds], dim=-1))
         row_probs = self.layer_logit(row_preds)
 
         # Col
-        col_avg_inputs = sample['features']['col_avg']
-        col_absDiff_inputs = sample['features']['col_absDiff']
-        col_spell_mean_inputs = sample['features']['col_spell_mean']
-        col_spell_sd_inputs = sample['features']['col_spell_sd']
-        col_conv_values = self.layer_avg_col(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS)
-        col_inputs = torch.cat([col_avg_inputs, col_absDiff_inputs, col_spell_mean_inputs, col_spell_sd_inputs, col_conv_values], dim=-1)
+        col_inputs = torch.cat([features.col, col_conv_values], dim=-1)
 
         # Col | Layers
         col_direct_preds = self.layer_linear_col(col_inputs)
-        col_convolved_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, 1)
+        col_convolved_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, CONV_PREDS_CHANNELS)
 
         col_preds = self.layer_fc_col(torch.cat([col_direct_preds, col_convolved_preds], dim=-1))
         col_probs = self.layer_logit(col_preds)
@@ -258,7 +242,7 @@ class TabliterModel(nn.Module):
 
 model = TabliterModel(hidden_sizes=HIDDEN_SIZES).to(DEVICE)
 sample = next(iter(dataloader_train))
-logits = model(sample)
+logits = model(sample.features)
 
 # Loss function
 # Loss function | Calculate target ratio to avoid dominant focus
@@ -272,8 +256,8 @@ def calculateWeights(targets):
     classWeights = classWeights / classWeights.sum()
     return classWeights
 
-targets_row = [(sample['labels']['row'].sum().item(), sample['labels']['row'].shape[0]) for sample in iter(dataset_train)]
-targets_col = [(sample['labels']['col'].sum().item(), sample['labels']['col'].shape[0]) for sample in iter(dataset_train)]
+targets_row = [(sample.targets.row.sum().item(), sample.targets.row.shape[0]) for sample in iter(dataset_train)]
+targets_col = [(sample.targets.col.sum().item(), sample.targets.col.shape[0]) for sample in iter(dataset_train)]
 classWeights = {'row': calculateWeights(targets=targets_row),
                 'col': calculateWeights(targets=targets_col)}
 
@@ -294,12 +278,12 @@ class WeightedBinaryCrossEntropyLoss(nn.Module):
 
         return torch.neg(torch.mean(loss))
 
-def calculateLoss(batch, preds, lossFunctions:dict, calculateCorrect=False):   
+def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False):   
     loss = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.float32)
     correct, maxCorrect = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
 
     for idx, lossType in enumerate(LOSS_TYPES):
-        target = batch['labels'][lossType].to(DEVICE)
+        target = targets[idx].to(DEVICE)
         pred = preds[idx].to(DEVICE)
         loss_fn = lossFunctions[lossType]
 
@@ -316,12 +300,11 @@ def calculateLoss(batch, preds, lossFunctions:dict, calculateCorrect=False):
 
 
 # Train
-lr = 0.5
 lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
                  'col': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
-optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+optimizer = torch.optim.SGD(model.parameters(), lr=MAX_LR)
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, mode='min', verbose=True)
-scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.2, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=MAX_LR, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
 
 def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4):
     print('Train')
@@ -330,8 +313,8 @@ def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4):
     epoch_loss = 0
     for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
         # Compute prediction and loss
-        preds = model(batch)
-        loss = calculateLoss(batch, preds, lossFunctions)
+        preds = model(batch.features)
+        loss = calculateLoss(batch.targets, preds, lossFunctions)
         epoch_loss += loss
         
         # Backpropagation
@@ -352,8 +335,8 @@ def val_loop(dataloader, model, lossFunctions):
     with torch.no_grad():
         for batch in dataloader:     # batch = next(iter(dataloader))
             # Compute prediction and loss
-            preds = model(batch)
-            val_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch, preds, lossFunctions, calculateCorrect=True)
+            preds = model(batch.features)
+            val_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
             val_loss += val_loss_batch
             correct  += correct_batch
             maxCorrect  += maxCorrect_batch
@@ -367,7 +350,33 @@ def val_loop(dataloader, model, lossFunctions):
     
     return val_loss
 
+# Describe model
+# Model description | Graph
+y = model(sample.features)
+make_dot(y, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(pathLogs / 'graph', format='png')
+
+# Model description | Count parameters
+def count_parameters(model):
+    table = PrettyTable(["Modules", "Parameters"])
+    total_params = 0
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad: continue
+        params = parameter.numel()
+        table.add_row([name, params])
+        total_params+=params
+    print(table)
+    print(f"Total Trainable Params: {total_params}")
+    return total_params
 print(model)
+count_parameters(model=model)
+
+# Model description | Tensorboard
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter("torchlogs/")
+writer.add_graph(model, input_to_model=[sample.features])
+writer.close()
+
+
 for t in range(EPOCHS):
     print(f"\nEpoch {t+1} of {EPOCHS}. Learning rate: {scheduler.get_last_lr()[0]:03f}")
     train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
@@ -381,8 +390,8 @@ def eval_loop(dataloader, model, lossFunctions, outPath=None):
     with torch.no_grad():
         for batchNumber, batch in enumerate(dataloader):
             # Compute prediction and loss
-            preds = model(batch)
-            eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch, preds, lossFunctions, calculateCorrect=True)
+            preds = model(batch.features)
+            eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
             eval_loss += eval_loss_batch
             correct  += correct_batch
             maxCorrect  += maxCorrect_batch
@@ -392,12 +401,12 @@ def eval_loop(dataloader, model, lossFunctions, outPath=None):
                 batch_size = dataloader.batch_size
                 for sampleNumber in range(batch_size):      # sampleNumber = 0
                     # Get sample info
-                    image = read_image(batch['meta']['path_image'][sampleNumber]).to(DEVICE)
-                    row_targets = batch['labels']['row'][sampleNumber]
+                    image = read_image(batch.meta.path_image[sampleNumber]).to(DEVICE)
+                    row_targets = batch.targets.row[sampleNumber]
                     row_predictions = preds.row[sampleNumber]
-                    col_targets = batch['labels']['col'][sampleNumber]
+                    col_targets = batch.targets.col[sampleNumber]
                     col_predictions = preds.col[sampleNumber]
-                    outName = os.path.basename(batch['meta']['path_image'][sampleNumber])
+                    outName = os.path.basename(batch.meta.path_image[sampleNumber])
 
                     imagePixels = torch.flatten(image, end_dim=1)
                     row_target_pixels = torch.broadcast_to(input=row_targets, size=(row_targets.numel(), 40)) * TARGET_MAX_LUMINOSITY
@@ -413,7 +422,7 @@ def eval_loop(dataloader, model, lossFunctions, outPath=None):
                     colPixels = torch.cat([colPixels, emptyBlock], axis=1)
 
                     img = torch.cat([img, colPixels], dim=0).cpu().numpy().astype(np.uint8)
-                    cv.imwrite(str(outPath / f'{outName}.jpg'), img)
+                    cv.imwrite(str(outPath / f'{outName}'), img)
 
     eval_loss = eval_loss / batchCount
     shareCorrect = correct / maxCorrect
@@ -428,21 +437,3 @@ def eval_loop(dataloader, model, lossFunctions, outPath=None):
 # Visualize results
 eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
 
-# Visualize model
-# Model | Graph
-y = model(sample)
-make_dot(y, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(pathLogs / 'graph', format='png')
-
-# Count parameters
-def count_parameters(model):
-    table = PrettyTable(["Modules", "Parameters"])
-    total_params = 0
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad: continue
-        params = parameter.numel()
-        table.add_row([name, params])
-        total_params+=params
-    print(table)
-    print(f"Total Trainable Params: {total_params}")
-    return total_params
-count_parameters(model=model)
