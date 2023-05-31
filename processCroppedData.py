@@ -6,7 +6,7 @@ from joblib import Parallel, delayed
 import shutil
 from collections import defaultdict
 import fitz
-import pandas as pd
+import pandas as pd; pd.set_option("mode.copy_on_write", True)
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
@@ -22,7 +22,7 @@ np.seterr(all='raise')
 
 # Constants
 DEBUG = False
-PARALLEL = True
+PARALLEL = False
 SEPARATOR_TYPE = 'wide'
 COMPLEXITY_SUFFIX = 'wide'
 
@@ -33,6 +33,7 @@ DPI_PYMUPDF = 72
 DPI_TARGET = 150
 DPI_OCR = 300
 PADDING = 40
+LINENO_GAP = 5
 PRECISION = np.float32
 
 LANGUAGES = 'nld+fra+deu+eng'
@@ -41,6 +42,7 @@ CONFIG_PYTESSERACT_FAST = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessd
 CONFIG_PYTESSERACT_LEGACY = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'
 TRANSPARANCY = int(0.25*255)
 FONT_LABEL = ImageFont.truetype('arial.ttf', size=40)
+FONT_LINE = ImageFont.truetype('arial.ttf', size=20)
 
 WINDOW_EMPTYROW_RELATIVE_FACTOR = 5
 WINDOW_EMPTYROW_WINDOW_SIZE = 5
@@ -55,6 +57,7 @@ pathPdfs_in = PATH_DATA_PDFS / '2023-03-31'  / 'samples_missing_pdfFiles'
 pathLabels_tabledetect_local = PATH_ROOT / 'data' / 'labels_tabledetect'
 pathPdfs_local = PATH_ROOT / 'data' / 'pdfs'
 
+pathOcr = PATH_ROOT / 'data' / 'ocr'
 pathWords = PATH_ROOT / 'data' / 'words'
 
 pathOut = PATH_ROOT / 'data' / f'real_{COMPLEXITY_SUFFIX}'
@@ -71,6 +74,7 @@ os.makedirs(pathPdfs_local, exist_ok=True)
 os.makedirs(pathLabels_tabledetect_local, exist_ok=True)
 os.makedirs(pathOut, exist_ok=True)
 os.makedirs(pathOut_all, exist_ok=True)
+os.makedirs(pathOcr, exist_ok=True)
 os.makedirs(pathWords, exist_ok=True)
 replaceDirs(pathOut_all / 'images')
 replaceDirs(pathOut_all / 'labels')
@@ -104,6 +108,95 @@ for tabledetect_labelFile in tabledetect_labelFiles:
     tabledetect_labelFiles_byPdf[pdfName].append(tabledetect_labelFile.name)
 
 # Gather | words per page
+def tighten_word_bbox(img_blackIs1, bboxRow):
+    # Get bbox pixels
+    pixelsInBbox = img_blackIs1[bboxRow['top']:bboxRow['bottom']+1, bboxRow['left']:bboxRow['right']+1]
+
+    # Exclude horizontal lines
+    wide_left = max(0, bboxRow['left']-20)
+    wide_right = min(img_blackIs1.shape[1], bboxRow['right']+20)
+    widerPixels = img_blackIs1[bboxRow['top']:bboxRow['bottom']+1, wide_left:wide_right]
+    containsLine = (widerPixels.mean(axis=1) >= 0.85)
+
+    try:
+        firstLine = np.where(containsLine)[0][0]
+        shave_line_top = np.where(containsLine[firstLine:] == False)[0][0] + firstLine + 1 if firstLine < pixelsInBbox.shape[0] // 4 else 0
+    except IndexError:
+        shave_line_top = 0
+
+    try:
+        lastLine = np.where(containsLine)[0][-1]
+        shave_line_bot = np.where(containsLine[:lastLine] == False)[0][-1] + 1 if lastLine > pixelsInBbox.shape[0] // 4 * 3 else 0
+    except IndexError:
+        shave_line_bot = 0
+
+    # Exclude vertical lines
+    tall_top = max(0, bboxRow['top']-20)
+    tall_bottom = min(img_blackIs1.shape[0], bboxRow['bottom']+20+1)
+    tallPixels = img_blackIs1[tall_top:tall_bottom, bboxRow['left']:bboxRow['right']+1]
+    containsLine = (tallPixels.mean(axis=0) >= 0.9)
+
+    try:
+        firstLine = np.where(containsLine)[0][0]
+        shave_line_left = np.where(containsLine[firstLine:] == False)[0][0] + firstLine + 1 if firstLine < pixelsInBbox.shape[1] // 4 else 0
+    except IndexError:
+        shave_line_left = 0
+
+    try:
+        lastLine = np.where(containsLine)[0][-1]
+        shave_line_right = np.where(containsLine[:lastLine] == False)[0][-1] + 1 if lastLine > pixelsInBbox.shape[1] // 4 * 3 else 0
+    except IndexError:
+        shave_line_right = 0
+
+    pixelsInBbox = pixelsInBbox[shave_line_top:(pixelsInBbox.shape[0]-shave_line_bot), shave_line_left:(pixelsInBbox.shape[1]-shave_line_right)]
+
+    rowBlacks = pixelsInBbox.sum(axis=1)
+    rowBlackCount = len(rowBlacks[rowBlacks!=0])
+    colBlacks = pixelsInBbox.sum(axis=0)
+
+    if rowBlackCount:
+        row_fewBlacks_absolute = (rowBlacks <= 2)
+        row_fewBlacks_relative = (rowBlacks <= np.mean(rowBlacks[rowBlacks!=0])/WINDOW_EMPTYROW_RELATIVE_FACTOR)
+        # Rolling window approach to control for text blocks that overlap previous line text
+        try:      
+            row_fewBlacks_window = np.median(sliding_window_view(rowBlacks, WINDOW_EMPTYROW_WINDOW_SIZE+1), axis=1)
+            row_fewBlacks_window = np.insert(row_fewBlacks_window, obj=row_fewBlacks_window.size//2, values=np.full(shape=WINDOW_EMPTYROW_WINDOW_SIZE, fill_value=999))     # Insert 999 in middle to recover obs lost due to window
+            row_fewBlacks_window = (row_fewBlacks_window < 0.01)
+        except ValueError:
+            row_fewBlacks_window = np.full_like(a=row_fewBlacks_absolute, fill_value=False)
+    else:
+        row_fewBlacks_absolute = np.full(shape=rowBlacks.shape, fill_value=True)
+        row_fewBlacks_relative = np.ndarray.view(row_fewBlacks_absolute)
+        row_fewBlacks_window = np.ndarray.view(row_fewBlacks_absolute)
+    
+    rowLikelyEmpty = row_fewBlacks_absolute | row_fewBlacks_relative | row_fewBlacks_window      
+    # rowLikelyEmpty = row_fewBlacks_absolute | row_fewBlacks_relative
+    colLikelyEmpty = (colBlacks == 0)
+
+    shave = {}
+    try:
+        shave['top'] = np.where(rowLikelyEmpty == False)[0][0]
+        shave['bottom'] = np.where(np.flip(rowLikelyEmpty) == False)[0][0]
+    # All empty based on abs+rel+wind
+    except IndexError:
+        try:
+            shave['top'] = np.where(row_fewBlacks_absolute == False)[0][0]  + shave_line_top
+            shave['bottom'] = np.where(row_fewBlacks_absolute == False)[0][-1]  + shave_line_top
+        # All empty based on abs too
+        except IndexError:
+            bboxRow['toKeep'] = False
+            return bboxRow
+    
+    shave['left'] = np.where(colLikelyEmpty == False)[0][0]
+    shave['right'] = np.where(np.flip(colLikelyEmpty) == False)[0][0]
+
+    bboxRow['left'] = bboxRow['left'] + shave['left'] + shave_line_left
+    bboxRow['right'] = bboxRow['right'] - shave['right'] + shave_line_left
+    bboxRow['top'] = bboxRow['top'] + shave['top'] + shave_line_top
+    bboxRow['bottom'] = bboxRow['bottom'] - shave['bottom'] + shave_line_top
+
+    return bboxRow
+
 BoxIntersect = namedtuple('BoxIntersect', field_names=['left', 'right', 'top', 'bottom', 'intersect', 'Index'])
 def boxes_intersect(box, box_target):
     overlap_x = ((box.left >= box_target.left) & (box.left < box_target.right)) | ((box.right >= box_target.left) & (box.left < box_target.left))
@@ -131,76 +224,130 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
         # Get words from page | Load page
         pageNumber = pageNumbers[pageIteration]
         page:fitz.Page = doc.load_page(page_id=pageNumber)
-        outPath = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pq'
+        pageName = f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}'
+        outPath = pathWords / f'{pageName}.pq'
         if os.path.exists(outPath):
             continue
 
         # Get words from page | Extract directly from PDF
         textPage = page.get_textpage(flags=fitz.TEXTFLAGS_WORDS)
         words = textPage.extractWORDS()
+
+        # Get words from page | Generate pillow and np images
+        page_image = page.get_pixmap(dpi=DPI_OCR, alpha=False, colorspace=fitz.csGRAY)
+        img = np.frombuffer(page_image.samples, dtype=np.uint8).reshape(page_image.height, page_image.width, page_image.n)
+        _, img_array = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+        img = Image.fromarray(img_array)
+        img_blackIs1 = np.where(img_array == 0, 1, 0)
+
         if len(words) == 0:
             # Get words from page | OCR if necessary
             textDfs = []
 
-            # Get words from page | OCR | From PDF | Fitz
-            textPage = page.get_textpage_ocr(flags=fitz.TEXTFLAGS_WORDS, language='nld+fra+deu+eng', dpi=300)
-            words = textPage.extractWORDS()
-            wordsDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(ocrLabel='tesseract-fitz')
-            wordsDf[['left', 'right', 'top', 'bottom']] = wordsDf[['left', 'right', 'top', 'bottom']] * (DPI_OCR / DPI_PYMUPDF)
-            textDfs.append(wordsDf)
-
-            # Get words from page | OCR | From Image
-            page_image = page.get_pixmap(dpi=DPI_OCR, alpha=False, colorspace=fitz.csGRAY)
-            img = Image.frombytes(mode='L', size=(page_image.width, page_image.height), data=page_image.samples)
-
             # Get words from page | OCR | From Image | PyTesseract Fast
-            text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_FAST, output_type=pytesseract.Output.DATAFRAME)
-            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'block_num', 'line_num', 'word_num', 'conf']].rename(columns={'line_num':'lineno', 'block_num':'blockno', 'word_num':'wordno'}).assign(ocrLabel='tesseract-fast')
+            pathSaved = pathOcr / f'{pageName}_tesseractFast.pq'
+            if not os.path.exists(pathSaved):
+                text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_FAST, output_type=pytesseract.Output.DATAFRAME)
+                text.to_parquet(path=pathSaved)
+            else:
+                text = pd.read_parquet(pathSaved)
+            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'conf']].assign(ocrLabel='tesseract-fast')
             wordsDf['right'] = wordsDf['left'] + wordsDf['width']
             wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
             wordsDf = wordsDf.drop(columns=['width', 'height'])
             textDfs.append(wordsDf)
             
             # Get words from page | OCR | From Image | PyTesseract Legacy
-            text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_LEGACY, output_type=pytesseract.Output.DATAFRAME)
-            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'block_num', 'line_num', 'word_num', 'conf']].rename(columns={'line_num':'lineno', 'block_num':'blockno', 'word_num':'wordno'}).assign(ocrLabel='tesseract-legacy')
+            pathSaved = pathOcr / f'{pageName}_tesseractLegacy.pq'
+            if not os.path.exists(pathSaved):
+                text:pd.DataFrame = pytesseract.image_to_data(img, lang=LANGUAGES, config=CONFIG_PYTESSERACT_LEGACY, output_type=pytesseract.Output.DATAFRAME)
+                text.to_parquet(path=pathSaved)
+            else:
+                text = pd.read_parquet(pathSaved)
+            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'conf']].assign(ocrLabel='tesseract-legacy')
             wordsDf['right'] = wordsDf['left'] + wordsDf['width']
             wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
             wordsDf = wordsDf.drop(columns=['width', 'height'])
             textDfs.append(wordsDf)
 
             # Get words from page | OCR | From Image | EasyOCR
-            img_array = np.array(img)
-            text = reader.readtext(image=img_array, batch_size=50, detail=1)
+            pathSaved = pathOcr / f'{pageName}_easyocr.pkl'
+            if not os.path.exists(pathSaved):
+                text = reader.readtext(image=img_array, batch_size=50, detail=1)
+                with open(pathSaved, 'wb') as file:
+                    pickle.dump(text, file)
+            else:
+                with open(pathSaved, 'rb') as file:
+                    text = pickle.load(file)
             text = [{'left': el[0][0][0], 'right': el[0][1][0], 'top': el[0][0][1], 'bottom': el[0][2][1], 'text': el[1], 'conf': el[2]*100} for el in text]
             text:pd.DataFrame = pd.DataFrame.from_records(text).assign(ocrLabel="easyocr")
-
             wordsDf = text.loc[text['conf'] > 30]
             textDfs.append(wordsDf)
 
             # Combine
             df = pd.concat(textDfs)
             df[['left', 'right', 'top', 'bottom']] = df[['left', 'right', 'top', 'bottom']].round(0).astype(int)
-            df['text_sparse'] = df['text'].str.replace('[^a-zA-Z0-9À-ÿ.\(\)_\-\+ ]', '', regex=True)
-            df = df.loc[df['text_sparse'].str.len() >= 1].drop(columns='text_sparse').reset_index(drop=True)
+            df['text_sparse_len'] = df['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\) ]', '', regex=True).str.len()
+            df = df.loc[df['text_sparse_len'] >= 1].drop(columns='text_sparse_len').reset_index(drop=True)
 
-            # Detect intersection
+            # Detect intersection #TD: remove intersections for tesseracts first
             easyocr_boxes = set(df.loc[df['ocrLabel'] == 'easyocr', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
-            other_boxes   = set(df.loc[df['ocrLabel'] != 'easyocr', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+            tessfast_boxes = set(df.loc[df['ocrLabel'] == 'tesseract-fast', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+            tesslegacy_boxes   = set(df.loc[df['ocrLabel'] == 'tesseract-legacy', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
 
-            other_boxes = [BoxIntersect(left=otherBox.left, right=otherBox.right, top=otherBox.top, bottom=otherBox.bottom, intersect=box_intersects_boxList(box=otherBox, box_targets=easyocr_boxes), Index=otherBox.Index) for otherBox in other_boxes]
+            boxes_fastLegacy_intersect = [BoxIntersect(left=legacyBox.left, right=legacyBox.right, top=legacyBox.top, bottom=legacyBox.bottom, intersect=box_intersects_boxList(box=legacyBox, box_targets=tessfast_boxes), Index=legacyBox.Index) for legacyBox in tesslegacy_boxes]
+            tesslegacy_extraboxes = [box for box in boxes_fastLegacy_intersect if not box.intersect]
+            tess_boxes = tessfast_boxes.union(set(tesslegacy_extraboxes))
+            
+            boxes_tess_intersect = [BoxIntersect(left=tessBox.left, right=tessBox.right, top=tessBox.top, bottom=tessBox.bottom, intersect=box_intersects_boxList(box=tessBox, box_targets=easyocr_boxes), Index=tessBox.Index) for tessBox in tess_boxes]
+            tess_extraboxes = [box for box in boxes_tess_intersect if not box.intersect]
 
             # Combine words
-            extraBoxes = [box for box in other_boxes if not box.intersect ]
-            extraBoxes = [BoxIntersect(left=extraBox.left, right=extraBox.right, top=extraBox.top, bottom=extraBox.bottom, intersect=box_intersects_boxList(box=extraBox, box_targets=extraBoxes), Index=extraBox.Index) for extraBox in extraBoxes]
-            indexesToKeep = [box.Index for box in easyocr_boxes.union(set(extraBoxes))]
+            indexesToKeep = [box.Index for box in easyocr_boxes.union(set(tess_extraboxes))]
             textDf = df.iloc[indexesToKeep]
+            textDf = textDf.reindex(columns=['top', 'left', 'bottom', 'right', 'text', 'conf', 'ocrLabel'])
 
+            # Crop bboxes
+            textDf['toKeep'] = True
+            textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
+            textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
+
+            # Define block, line and word numbers
+            textDf = textDf.sort_values(by=['top', 'left']).reset_index()
+            textDf['wordno'], textDf['lineno'], previous_bottom, line_counter, word_counter = 0, 0, 0, 0, 0
+            textDf['blockno'] = 0
+            
+            heightCol = textDf['bottom'] - textDf['top']
+            maxHeight = heightCol.mean() + 2 * heightCol.std()
+            textDf = textDf.loc[heightCol <= maxHeight]
+
+            for idx, row in textDf.iterrows():
+                if ((row['bottom'] - previous_bottom) > LINENO_GAP) and (row['top'] > previous_bottom):
+                     word_counter = 0
+                     line_counter += 1
+                     previous_bottom = row['bottom']
+                else:
+                    word_counter += 1
+                textDf.loc[idx, ['lineno', 'wordno']] = line_counter, word_counter
+
+            # Harmonise top/bottom by line (bit wonky after crop/source combination otherwise)
+            textDf['top'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
+            textDf['bottom'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
+            
         else:
-            textDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(ocrLabel='pdf')
-            textDf['text_sparse_len'] = textDf['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\)_ ]', '', regex=True).str.len()
-            textDf = textDf.loc[(textDf['text_sparse_len'] >= 2) | (textDf['text'] == '.')].drop(columns='text_sparse_len').reset_index(drop=True)
-            textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']] * (DPI_OCR / DPI_PYMUPDF)
+            textDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(**{'ocrLabel': 'pdf', 'conf':100})
+            textDf['text_sparse_len'] = textDf['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\) ]', '', regex=True).str.len()
+            textDf = textDf.loc[(textDf['text_sparse_len'] >= 2) | (textDf['text'] == '.') | (textDf['text'].str.isalnum())].drop(columns='text_sparse_len').reset_index(drop=True)
+            textDf[['left', 'right', 'top', 'bottom']] = (textDf[['left', 'right', 'top', 'bottom']] * (DPI_OCR / DPI_PYMUPDF)).round(0).astype(int)
+
+            # Crop bboxes
+            textDf['toKeep'] = True
+            textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
+            textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
+            
+            # Harmonise top/bottom by line (bit wonky after crop otherwise)
+            textDf['top'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
+            textDf['bottom'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
         
         # Get words from page | Save
         textDf.to_parquet(outPath)
@@ -216,16 +363,23 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             'other': (0, 128, 0, int(0.5*255))
         }
     
-        for box in textDf.itertuples('box'):      # box = intersecting_boxes[0]
+        for box in textDf.itertuples('box'):      
             color = colors[box.ocrLabel] if box.ocrLabel in ['easyocr', 'pdf'] else colors['other']
-            img_annot.rectangle(xy=(box.left, box.top, box.right, box.bottom), fill=color, width=4, outline=(255,255,255,TRANSPARANCY))
+            img_annot.rectangle(xy=(box.left, box.top, box.right, box.bottom), fill=color)
+
+        lineDf = textDf.sort_values(by=['lineno', 'wordno']).drop_duplicates('lineno', keep='first')
+        lineLeft = max(lineDf['left'].min() - 50, 20)
+
+        for line in lineDf.itertuples('line'):      # line = next(lineDf.itertuples('line'))
+            img_annot.text(xy=(lineLeft, line.top), text=str(line.lineno), anchor='la', fill='black', font=FONT_LINE)
+
     
         img_annot.text(xy=(img.size[0] // 4 * 1, img.size[1] // 15 * 14), text='easyocr', anchor='ld', fill=colors['easyocr'], font=FONT_LABEL)
         img_annot.text(xy=(img.size[0] // 4 * 2, img.size[1] // 15 * 14), text='pdf', anchor='ld', fill=colors['pdf'], font=FONT_LABEL)
         img_annot.text(xy=(img.size[0] // 4 * 3, img.size[1] // 15 * 14), text='tesseract', anchor='ld', fill=colors['other'], font=FONT_LABEL)
 
         img = Image.alpha_composite(img.convert('RGBA'), img_overlay)
-        img.convert('RGB').save(f'{os.path.splitext(outPath)[0]}.png')
+        img.convert('RGB').save(f'{os.path.splitext(outPath)[0]}.jpg', quality=30)
 
 
 if PARALLEL:
@@ -270,54 +424,9 @@ def getSpellLengths(inarray):
             z = np.diff(np.append(-1, i)) / n        # run lengths
             return z
 
-def tighten_word_bbox(img_blackIs1, bboxRow):
-    pixelsInBbox = img_blackIs1[bboxRow['top']:bboxRow['bottom']+1, bboxRow['left']:bboxRow['right']+1]
-
-    rowBlacks = pixelsInBbox.sum(axis=1)
-    rowBlackCount = len(rowBlacks[rowBlacks!=0])
-    colBlacks = pixelsInBbox.sum(axis=0)
-
-    if rowBlackCount:
-        row_fewBlacks_absolute = (rowBlacks <= 2)
-        row_fewBlacks_relative = (rowBlacks <= np.mean(rowBlacks[rowBlacks!=0])/WINDOW_EMPTYROW_RELATIVE_FACTOR)
-        try:
-            row_fewBlacks_window = np.median(sliding_window_view(rowBlacks, WINDOW_EMPTYROW_WINDOW_SIZE+1), axis=1)
-            row_fewBlacks_window = np.insert(row_fewBlacks_window, obj=row_fewBlacks_window.size//2, values=np.full(shape=WINDOW_EMPTYROW_WINDOW_SIZE, fill_value=999))     # Insert 999 in middle to recover obs lost due to window
-            row_fewBlacks_window = (row_fewBlacks_window < 0.01)
-        except ValueError:
-            row_fewBlacks_window = np.full_like(a=row_fewBlacks_absolute, fill_value=False)
-    else:
-        row_fewBlacks_absolute = np.full(shape=rowBlacks.shape, fill_value=True)
-        row_fewBlacks_relative = np.ndarray.view(row_fewBlacks_absolute)
-        row_fewBlacks_window = np.ndarray.view(row_fewBlacks_absolute)
+def index_to_bboxCross(index, mins, maxes):
+    return ((mins <= index) & (maxes >=index)).sum()
     
-    rowLikelyEmpty = row_fewBlacks_absolute | row_fewBlacks_relative | row_fewBlacks_window      
-    colLikelyEmpty = (colBlacks == 0)
-
-    shave = {}
-    try:
-        shave['top'] = np.where(rowLikelyEmpty == False)[0][0]
-        shave['bottom'] = np.where(np.flip(rowLikelyEmpty) == False)[0][0]
-    # All empty based on abs+rel+wind
-    except IndexError:
-        try:
-            shave['top'] = np.where(row_fewBlacks_absolute == False)[0][0]
-            shave['bottom'] = np.where(row_fewBlacks_absolute == False)[0][-1]
-        # All empty based on abs too
-        except IndexError:
-            bboxRow['toKeep'] = False
-            return bboxRow
-    
-    shave['left'] = np.where(colLikelyEmpty == False)[0][0]
-    shave['right'] = np.where(np.flip(colLikelyEmpty) == False)[0][0]
-
-    bboxRow['left'] = bboxRow['left'] + shave['left']
-    bboxRow['right'] = bboxRow['right'] - shave['right']
-    bboxRow['top'] = bboxRow['top'] + shave['top']
-    bboxRow['bottom'] = bboxRow['bottom'] - shave['bottom']
-
-    return bboxRow
-
 def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     # Prepare image
     _, img_cv = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
@@ -328,7 +437,7 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
 
     # Features | Visual
     features['row_absDiff'] = (np.asarray([np.absolute(np.diff(row)).mean() for row in img01]))
-    features['row_avg'] = np.asarray([np.mean(row) for row in img01])
+    features['row_avg'] = np.asarray([np.mean(row) for row in img01])  
     
     features['col_absDiff'] =   np.asarray([np.absolute(np.diff(col)).mean() for col in img01.T])
     features['col_avg'] = np.asarray([np.mean(col) for col in img01.T])
@@ -341,30 +450,49 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     features['col_spell_mean'] = [np.mean(col_spell_length) for col_spell_length in col_spell_lengths]
     features['col_spell_sd'] = [np.std(col_spell_length) for col_spell_length in col_spell_lengths]
 
-    # Features | Text
-    # Features | Text | Crop bboxes
-    img_blackIs1 = np.where(img01.astype(np.uint8) == 0, 1, 0)
-    textDf['toKeep'] = True
-    textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
-    textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
-    
-    # Features | Text | Harmonise top/bottom by line (bit wonky after crop otherwise)
-    textDf['top'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
-    textDf['bottom'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
+    features['global_rowAvg_p0'], features['global_rowAvg_p5'], features['global_rowAvg_p10'] = np.percentile(features['row_avg'], q=[0, 5, 10])
+    features['global_colAvg_p0'], features['global_colAvg_p5'], features['global_colAvg_p10'] = np.percentile(features['col_avg'], q=[0, 5, 10])
 
-    if DEBUG:
-        img_table = img.copy().convert('RGB')
-        img_table_annot = ImageDraw.Draw(img_table)
-        for idx, row in textDf.iterrows():
-            img_table_annot.rectangle(xy=row[['left', 'top', 'right', 'bottom']], outline='green')
-            img_table_annot.text(xy=row[['left', 'top', 'right', 'bottom']], text=str(idx), fill=40, anchor='ld')
-        img_table.save('temp.png')
+    # Features | Text       
+    # Features | Text | Text like rowstart
+    # Features | Text | Text like rowstart | Identify lines with text like rowstart
+    textDf_CoN = textDf.sort_values(by=['blockno', 'lineno', 'wordno']).drop_duplicates(subset=['blockno', 'lineno'], keep='first').drop(columns=['left', 'right', 'blockno', 'wordno', 'ocrLabel', 'conf']).reset_index(drop=True)
+    textDf_CoN['lineno_seq'] = textDf_CoN['lineno'].rank().astype(int)
+    textDf_CoN['text_like_rowstart'] = (textDf_CoN['text'].str[0].str.isupper() | textDf_CoN['text'].str[0].str.isdigit() | textDf_CoN['text'].str[:5].str.contains(r'[\.\)\-]', regex=True) )*1
+    textDf_CoN = textDf_CoN.drop_duplicates(subset='top', keep='first')
+
+    # Features | Text | Text like rowstart | Generate indicator
+    # Features | Text | Text like rowstart | Generate indicator | Gather info on next line
+    textDf_CoN['F1_text_like_rowstart'] = textDf_CoN['text_like_rowstart'].shift(periods=-1).astype(pd.Int8Dtype())
+
+    # Features | Text | Text like rowstart | Generate indicator | Assign lines to img rows
+    df_CoN = pd.DataFrame(data=np.arange(img01.shape[0], dtype=np.int32), columns=['top'])
+    df_CoN = pd.merge_asof(left=df_CoN, right=textDf_CoN[['top', 'bottom', 'lineno', 'lineno_seq']], left_on='top', right_on='top', direction='backward')
+    df_CoN['lineno_seq'] = df_CoN['lineno_seq'].fillna(value=0)                                             # Before first text: 0
+    df_CoN.loc[df_CoN['top'] > df_CoN['bottom'].max(), 'lineno_seq'] = df_CoN['lineno_seq'].max() + 1       # After  last  text: max + 1
+
+    # Features | Text | Text like rowstart | Generate indicator | Identify img rows between text lines
+    df_CoN['between_textlines'] = df_CoN['top'] > df_CoN['bottom']
+
+    # Features | Text | Text like rowstart | Generate indicator | Force some separator space (sometimes text lines link exactly)
+    betweenText_max_per_line = df_CoN.groupby('lineno_seq')['between_textlines'].transform(max)
+    df_CoN['noRowsBetweenText'] = (betweenText_max_per_line == 0)
+
+    df_CoN.to_stata('temp2.dta')
+
+    df_CoN = df_CoN.merge(right=textDf_CoN[['lineno_seq', 'text_like_rowstart', 'F1_text_like_rowstart']], left_on='lineno_seq', right_on='lineno_seq')
+
+    df_CoN['indicator'] = 0
+    df_CoN.loc[df_CoN['text_like_rowstart'] == 1, 'indicator'] = 1
+    df_CoN.loc[(df_CoN['F1_text_like_rowstart'] == 0) & (), 'indicator'] = 1
+
     
-    # Features | Text | Capital or Numeric
-    textDf_CoN = textDf.copy().sort_values(by=['blockno', 'lineno', 'wordno']).drop_duplicates(subset=['blockno', 'lineno'], keep='first')
-    textDf_CoN['firstletter_capitalOrNumeric'] = (textDf_CoN['text'].str[0].str.isupper() | textDf_CoN['text'].str[0].str.isdigit())*1
-    textDf_CoN = textDf_CoN.loc[(textDf_CoN.conf > 50)]
-    textDf_CoN = textDf_CoN[['top', 'firstletter_capitalOrNumeric']].drop_duplicates(subset='top', keep='first')
+    
+    
+    
+    img01.shape
+
+    
     textDf_CoN = textDf_CoN.set_index('top').reindex(range(0, img01.shape[0]))
     textDf_CoN['firstletter_capitalOrNumeric'] = textDf_CoN['firstletter_capitalOrNumeric'].fillna(method='ffill')
     textDf_CoN['firstletter_capitalOrNumeric'] = textDf_CoN['firstletter_capitalOrNumeric'].fillna(value=0)
@@ -374,8 +502,6 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     textDf_WC = textDf.copy().sort_values(by=['left', 'top', 'right', 'bottom'])
     left, right, top, bottom = (textDf_WC[dim].values for dim in ['left', 'right', 'top', 'bottom'])
     
-    def index_to_bboxCross(index, mins, maxes):
-        return ((mins <= index) & (maxes >=index)).sum()
     features['row_wordsCrossed_count'] = np.array([index_to_bboxCross(index=index, mins=top, maxes=bottom) for index in range(img01.shape[0])])
     features['col_wordsCrossed_count'] = np.array([index_to_bboxCross(index=index, mins=left, maxes=right) for index in range(img01.shape[1])])
 
@@ -438,9 +564,9 @@ def processPdf(pdfName):
         fitzBoxes = yoloFile_to_fitzBox(yoloPath=yoloPath, targetPdfSize=page.mediabox_size)
 
         # Get text on page
-        pathWordsFile = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pkl'
-        with open(pathWordsFile, 'rb') as file:
-            words = pickle.load(file)
+        pathWordsFile = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pq'
+        textDf = pd.read_parquet(pathWordsFile)
+        textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']] * (DPI_PYMUPDF / DPI_OCR)
 
         # Loop over tables
         for tableIteration, _ in enumerate(fitzBoxes):
@@ -460,11 +586,7 @@ def processPdf(pdfName):
 
             # Process text
             # Process text | Reduce to table bbox
-            textDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno'])
             textDf = textDf.loc[(textDf['top'] >= tableRect.y0) & (textDf['left'] >= tableRect.x0) & (textDf['bottom'] <= tableRect.y1) & (textDf['right'] <= tableRect.x1)]        # clip to table
-
-            # Process text | Reduce to words with 2 alphanumeric characters
-            textDf = textDf.loc[textDf['text'].str.len() >= 2]
 
             # Process text | Convert to padded table image pixel coordinates
             textDf[['left', 'right']] = textDf[['left', 'right']] - tableRect.x0
@@ -472,15 +594,9 @@ def processPdf(pdfName):
             textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']] * (DPI_TARGET / DPI_PYMUPDF) + PADDING
             textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']].round(0).astype(int)
 
-            if DEBUG:
-                img_table = img.copy().convert('RGB')
-                img_table_annot = ImageDraw.Draw(img_table)
-                for idx, row in textDf.iterrows():      # row = df.iloc[0]
-                    img_table_annot.rectangle(xy=row[['left', 'top', 'right', 'bottom']], outline='red')
-                img_table.show()
-
             # Generate features
-            textDf['conf'] = 100
+            if 'conf' not in textDf.columns:
+                textDf['conf'] = 100
             img01, img_cv, features = imgAndWords_to_features(img=img, textDf=textDf)
 
             t = textDf.copy()

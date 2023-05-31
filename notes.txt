@@ -15,3 +15,14 @@ spanning cell too large
 	
 annotations to check
 	2007-09401401-p9_t2.jpg
+	
+word recognitions to look into
+	overly tall bboxes
+	2007-15500271-p20
+	2007-16100349-p9
+	2007-23600165-p6
+	
+skewed tables
+	2009-39800122-p8
+	2009-39800122-p9
+	2007-05900082-p6

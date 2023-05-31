@@ -7,6 +7,9 @@
 	"settings": {
 		"python.analysis.inlayHints.callArgumentNames": false,
 		"python.analysis.logLevel": "Trace",
-		"editor.wordWrap": "on"
+		"editor.wordWrap": "on",
+		"python.analysis.exclude": [
+			"**/data/**"
+		]
 	}
 }
