@@ -482,60 +482,49 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
 
     # Features | Text | Text like rowstart | Generate indicator
     # Features | Text | Text like rowstart | Generate indicator | Gather info on next line
-    textDf_CoN['F1_text_like_rowstart'] = textDf_CoN['text_like_rowstart'].shift(periods=-1).astype(pd.Int8Dtype())
+    textDf_CoN['F1_text_like_rowstart'] = textDf_CoN['text_like_rowstart'].shift(periods=-1).fillna(1).astype(int)
 
     # Features | Text | Text like rowstart | Generate indicator | Assign lines to img rows
-    df_CoN = pd.DataFrame(data=np.arange(img01.shape[0], dtype=np.int32), columns=['top'])
-    df_CoN = pd.merge_asof(left=df_CoN, right=textDf_CoN[['top', 'bottom', 'lineno', 'lineno_seq']], left_on='top', right_on='top', direction='backward')
-    df_CoN['lineno_seq'] = df_CoN['lineno_seq'].fillna(value=0)                                             # Before first text: 0
-    df_CoN.loc[df_CoN['top'] > df_CoN['bottom'].max(), 'lineno_seq'] = df_CoN['lineno_seq'].max() + 1       # After  last  text: max + 1
-    lastLineNo = df_CoN['lineno_seq'].max()
+    rowTextDf = pd.DataFrame(data=np.arange(img01.shape[0], dtype=np.int32), columns=['top'])
+    rowTextDf = pd.merge_asof(left=rowTextDf, right=textDf_CoN[['top', 'bottom', 'lineno', 'lineno_seq']], left_on='top', right_on='top', direction='backward')
+    rowTextDf['lineno_seq'] = rowTextDf['lineno_seq'].fillna(value=0)                                             # Before first text: 0
+    rowTextDf.loc[rowTextDf['top'] > rowTextDf['bottom'].max(), 'lineno_seq'] = rowTextDf['lineno_seq'].max() + 1       # After  last  text: max + 1
+    lastLineNo = rowTextDf['lineno_seq'].max()
 
     # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines
-    df_CoN['between_textlines'] = df_CoN['top'] > df_CoN['bottom']
-    df_CoN.loc[df_CoN['lineno_seq'] == lastLineNo, 'between_textlines'] = False
+    rowTextDf['between_textlines'] = rowTextDf['top'] > rowTextDf['bottom']
+    rowTextDf.loc[rowTextDf['lineno_seq'] == lastLineNo, 'between_textlines'] = False
     
     # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines | For the start and end lines, set everything that isn't padding to separator
-    firstNonWhite_line0 = np.where(features['row_avg'][df_CoN.loc[df_CoN['lineno_seq'] == 0].index] < 1)[0][0]
-    df_CoN.loc[(df_CoN.index >= firstNonWhite_line0) & (df_CoN['lineno_seq'] == 0), 'between_textlines'] = True
+    firstNonWhite_line0 = np.where(features['row_avg'][rowTextDf.loc[rowTextDf['lineno_seq'] == 0].index] < 1)[0][0]
+    rowTextDf.loc[(rowTextDf.index >= firstNonWhite_line0) & (rowTextDf['lineno_seq'] == 0), 'between_textlines'] = True
 
-    lastNonWhite_lineLast = np.where(np.flip(features['row_avg'][df_CoN.loc[df_CoN['lineno_seq'] == df_CoN['lineno_seq'].max()].index]) < 1)[0][0]       # distance from end
-    df_CoN.loc[(df_CoN.index <= len(df_CoN.index)-lastNonWhite_lineLast) & (df_CoN['lineno_seq'] == df_CoN['lineno_seq'].max()), 'between_textlines'] = True
+    lastNonWhite_lineLast = np.where(np.flip(features['row_avg'][rowTextDf.loc[rowTextDf['lineno_seq'] == rowTextDf['lineno_seq'].max()].index]) < 1)[0][0]       # distance from end
+    rowTextDf.loc[(rowTextDf.index <= len(rowTextDf.index)-lastNonWhite_lineLast) & (rowTextDf['lineno_seq'] == rowTextDf['lineno_seq'].max()), 'between_textlines'] = True
 
     # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines | Assign half of separator to neighbouring lines (so we can verify that all lines contain separators)
-    lastRow_line0 = df_CoN.loc[df_CoN['lineno_seq'] == 0].index.max()
+    lastRow_line0 = rowTextDf.loc[rowTextDf['lineno_seq'] == 0].index.max()
     middleOfSeparator_line0 = firstNonWhite_line0 + (lastRow_line0 - firstNonWhite_line0) // 2
-    df_CoN.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1
+    rowTextDf.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1
 
-    firstRow_lineLast = df_CoN.loc[df_CoN['lineno_seq'] == lastLineNo].index.min()
-    separatorRowCount_lineLast = df_CoN.loc[(df_CoN['lineno_seq'] == lastLineNo), 'between_textlines'].sum()
+    firstRow_lineLast = rowTextDf.loc[rowTextDf['lineno_seq'] == lastLineNo].index.min()
+    separatorRowCount_lineLast = rowTextDf.loc[(rowTextDf['lineno_seq'] == lastLineNo), 'between_textlines'].sum()
     middleOfSeparator_lineLast = firstRow_lineLast + (separatorRowCount_lineLast // 2)
-    df_CoN.loc[firstRow_lineLast:middleOfSeparator_lineLast+1, 'lineno_seq'] = lastLineNo - 1
+    rowTextDf.loc[firstRow_lineLast:middleOfSeparator_lineLast+1, 'lineno_seq'] = lastLineNo - 1
     
-    df_CoN.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1  
-
-    # Features | Text | Text like rowstart | Generate indicator | Force some separator space (sometimes text lines link exactly)
-    betweenText_max_per_line = df_CoN.groupby('lineno_seq')['between_textlines'].transform(max)
+    rowTextDf.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1  
+    
+    betweenText_max_per_line = rowTextDf.groupby('lineno_seq')['between_textlines'].transform(max)
     if betweenText_max_per_line.min() == False:
         raise Exception('Not all lines contain separators')
 
-    df_CoN = df_CoN.merge(right=textDf_CoN[['lineno_seq', 'text_like_rowstart', 'F1_text_like_rowstart']], left_on='lineno_seq', right_on='lineno_seq')
+    # Features | Text | Text like rowstart | Generate indicator | Merge text_like_rowstart info
+    rowTextDf = rowTextDf.merge(right=textDf_CoN[['lineno_seq', 'text_like_rowstart', 'F1_text_like_rowstart']], left_on='lineno_seq', right_on='lineno_seq')
+    rowTextDf['between_textlines_like_rowstart'] = rowTextDf['between_textlines'] & rowTextDf['F1_text_like_rowstart']
 
-    df_CoN['indicator'] = 0
-    df_CoN.loc[df_CoN['text_like_rowstart'] == 1, 'indicator'] = 1
-    df_CoN.loc[(df_CoN['F1_text_like_rowstart'] == 0) & (), 'indicator'] = 1
-
-    
-    
-    
-    
-    img01.shape
-
-    
-    textDf_CoN = textDf_CoN.set_index('top').reindex(range(0, img01.shape[0]))
-    textDf_CoN['firstletter_capitalOrNumeric'] = textDf_CoN['firstletter_capitalOrNumeric'].fillna(method='ffill')
-    textDf_CoN['firstletter_capitalOrNumeric'] = textDf_CoN['firstletter_capitalOrNumeric'].fillna(value=0)
-    features['row_firstletter_capitalOrNumeric'] = textDf_CoN['firstletter_capitalOrNumeric'].to_numpy().astype(np.uint8)
+    # Features | Text | Text like rowstart | Generate indicator | Add to features
+    features['row_between_textlines']               = rowTextDf['between_textlines'].to_numpy().astype(np.uint8)
+    features['row_between_textlines_like_rowstart'] = rowTextDf['between_textlines_like_rowstart'].to_numpy().astype(np.uint8)
 
     # Features | Text | Words crossed per row/col
     textDf_WC = textDf.copy().sort_values(by=['left', 'top', 'right', 'bottom'])
