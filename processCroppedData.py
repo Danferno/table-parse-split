@@ -160,8 +160,12 @@ def tighten_word_bbox(img_blackIs1, bboxRow):
         # Rolling window approach to control for text blocks that overlap previous line text
         try:      
             row_fewBlacks_window = np.median(sliding_window_view(rowBlacks, WINDOW_EMPTYROW_WINDOW_SIZE+1), axis=1)
-            row_fewBlacks_window = np.insert(row_fewBlacks_window, obj=row_fewBlacks_window.size//2, values=np.full(shape=WINDOW_EMPTYROW_WINDOW_SIZE, fill_value=999))     # Insert 999 in middle to recover obs lost due to window
-            row_fewBlacks_window = (row_fewBlacks_window < 0.01)
+            if row_fewBlacks_window.max() < 0.01:       # For single rows (e.g. all dots) it sometimes returns all empty
+                row_fewBlacks_window = np.full_like(row_fewBlacks_window, fill_value=False, dtype=bool)
+            else:
+                row_fewBlacks_window = (row_fewBlacks_window < 0.01)
+            row_fewBlacks_window = np.insert(row_fewBlacks_window, obj=row_fewBlacks_window.size//2, values=np.full(shape=WINDOW_EMPTYROW_WINDOW_SIZE, fill_value=False))     # Insert 999 in middle to recover obs lost due to window
+            
         except ValueError:
             row_fewBlacks_window = np.full_like(a=row_fewBlacks_absolute, fill_value=False)
     else:
@@ -170,7 +174,6 @@ def tighten_word_bbox(img_blackIs1, bboxRow):
         row_fewBlacks_window = np.ndarray.view(row_fewBlacks_absolute)
     
     rowLikelyEmpty = row_fewBlacks_absolute | row_fewBlacks_relative | row_fewBlacks_window      
-    # rowLikelyEmpty = row_fewBlacks_absolute | row_fewBlacks_relative
     colLikelyEmpty = (colBlacks == 0)
 
     shave = {}
@@ -196,6 +199,24 @@ def tighten_word_bbox(img_blackIs1, bboxRow):
     bboxRow['bottom'] = bboxRow['bottom'] - shave['bottom'] + shave_line_top
 
     return bboxRow
+
+def harmonise_bbox_height(textDf):
+    textDf['top_uniform'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
+    textDf['bottom_uniform'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
+
+    # Harmonise top/bottom by line | Check if always gap between lines in uniform setting
+    checkGapDf = textDf[['lineno', 'top_uniform', 'bottom_uniform']].drop_duplicates()
+    checkGapDf['next_top'] = checkGapDf['top_uniform'].shift(-1).fillna(9999999)
+    checkGapDf['previous_bottom'] = checkGapDf['bottom_uniform'].shift(1).fillna(0)
+    checkGapDf['uniform_OK'] = (checkGapDf['bottom_uniform'] < checkGapDf['next_top']) & (checkGapDf['top_uniform'] > checkGapDf['previous_bottom'])
+
+    # Harmonise top/bottom by line | Only make uniform if gap always remains
+    textDf = textDf.merge(right=checkGapDf[['lineno', 'uniform_OK']], on='lineno', how='left')
+    textDf.loc[textDf['uniform_OK'], 'top'] = textDf.loc[textDf['uniform_OK'], 'top_uniform']
+    textDf.loc[textDf['uniform_OK'], 'bottom'] = textDf.loc[textDf['uniform_OK'], 'bottom_uniform']
+    textDf = textDf.drop(columns=['top_uniform', 'bottom_uniform', 'uniform_OK'])
+
+    return textDf
 
 BoxIntersect = namedtuple('BoxIntersect', field_names=['left', 'right', 'top', 'bottom', 'intersect', 'Index'])
 def boxes_intersect(box, box_target):
@@ -290,7 +311,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             df['text_sparse_len'] = df['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\) ]', '', regex=True).str.len()
             df = df.loc[df['text_sparse_len'] >= 1].drop(columns='text_sparse_len').reset_index(drop=True)
 
-            # Detect intersection #TD: remove intersections for tesseracts first
+            # Detect intersection
             easyocr_boxes = set(df.loc[df['ocrLabel'] == 'easyocr', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
             tessfast_boxes = set(df.loc[df['ocrLabel'] == 'tesseract-fast', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
             tesslegacy_boxes   = set(df.loc[df['ocrLabel'] == 'tesseract-legacy', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
@@ -313,7 +334,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
 
             # Define block, line and word numbers
-            textDf = textDf.sort_values(by=['top', 'left']).reset_index()
+            textDf = textDf.sort_values(by=['top', 'left']).reset_index(drop=True)
             textDf['wordno'], textDf['lineno'], previous_bottom, line_counter, word_counter = 0, 0, 0, 0, 0
             textDf['blockno'] = 0
             
@@ -331,8 +352,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
                 textDf.loc[idx, ['lineno', 'wordno']] = line_counter, word_counter
 
             # Harmonise top/bottom by line (bit wonky after crop/source combination otherwise)
-            textDf['top'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
-            textDf['bottom'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
+            textDf = harmonise_bbox_height(textDf)
             
         else:
             textDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(**{'ocrLabel': 'pdf', 'conf':100})
@@ -345,9 +365,8 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
             textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
             
-            # Harmonise top/bottom by line (bit wonky after crop otherwise)
-            textDf['top'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
-            textDf['bottom'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
+            # Harmonise top/bottom by line (bit wonky after crop/source combination otherwise)
+            textDf = harmonise_bbox_height(textDf)
         
         # Get words from page | Save
         textDf.to_parquet(outPath)
@@ -470,15 +489,35 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     df_CoN = pd.merge_asof(left=df_CoN, right=textDf_CoN[['top', 'bottom', 'lineno', 'lineno_seq']], left_on='top', right_on='top', direction='backward')
     df_CoN['lineno_seq'] = df_CoN['lineno_seq'].fillna(value=0)                                             # Before first text: 0
     df_CoN.loc[df_CoN['top'] > df_CoN['bottom'].max(), 'lineno_seq'] = df_CoN['lineno_seq'].max() + 1       # After  last  text: max + 1
+    lastLineNo = df_CoN['lineno_seq'].max()
 
-    # Features | Text | Text like rowstart | Generate indicator | Identify img rows between text lines
+    # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines
     df_CoN['between_textlines'] = df_CoN['top'] > df_CoN['bottom']
+    df_CoN.loc[df_CoN['lineno_seq'] == lastLineNo, 'between_textlines'] = False
+    
+    # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines | For the start and end lines, set everything that isn't padding to separator
+    firstNonWhite_line0 = np.where(features['row_avg'][df_CoN.loc[df_CoN['lineno_seq'] == 0].index] < 1)[0][0]
+    df_CoN.loc[(df_CoN.index >= firstNonWhite_line0) & (df_CoN['lineno_seq'] == 0), 'between_textlines'] = True
+
+    lastNonWhite_lineLast = np.where(np.flip(features['row_avg'][df_CoN.loc[df_CoN['lineno_seq'] == df_CoN['lineno_seq'].max()].index]) < 1)[0][0]       # distance from end
+    df_CoN.loc[(df_CoN.index <= len(df_CoN.index)-lastNonWhite_lineLast) & (df_CoN['lineno_seq'] == df_CoN['lineno_seq'].max()), 'between_textlines'] = True
+
+    # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines | Assign half of separator to neighbouring lines (so we can verify that all lines contain separators)
+    lastRow_line0 = df_CoN.loc[df_CoN['lineno_seq'] == 0].index.max()
+    middleOfSeparator_line0 = firstNonWhite_line0 + (lastRow_line0 - firstNonWhite_line0) // 2
+    df_CoN.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1
+
+    firstRow_lineLast = df_CoN.loc[df_CoN['lineno_seq'] == lastLineNo].index.min()
+    separatorRowCount_lineLast = df_CoN.loc[(df_CoN['lineno_seq'] == lastLineNo), 'between_textlines'].sum()
+    middleOfSeparator_lineLast = firstRow_lineLast + (separatorRowCount_lineLast // 2)
+    df_CoN.loc[firstRow_lineLast:middleOfSeparator_lineLast+1, 'lineno_seq'] = lastLineNo - 1
+    
+    df_CoN.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1  
 
     # Features | Text | Text like rowstart | Generate indicator | Force some separator space (sometimes text lines link exactly)
     betweenText_max_per_line = df_CoN.groupby('lineno_seq')['between_textlines'].transform(max)
-    df_CoN['noRowsBetweenText'] = (betweenText_max_per_line == 0)
-
-    df_CoN.to_stata('temp2.dta')
+    if betweenText_max_per_line.min() == False:
+        raise Exception('Not all lines contain separators')
 
     df_CoN = df_CoN.merge(right=textDf_CoN[['lineno_seq', 'text_like_rowstart', 'F1_text_like_rowstart']], left_on='lineno_seq', right_on='lineno_seq')
 
