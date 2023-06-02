@@ -47,6 +47,7 @@ FONT_LINE = ImageFont.truetype('arial.ttf', size=20)
 WINDOW_EMPTYROW_RELATIVE_FACTOR = 5
 WINDOW_EMPTYROW_WINDOW_SIZE = 5
 
+LUMINOSITY_GT_FEATURES_MAX = 240
 LUMINOSITY_FILLER = 255
 
 # Derived paths
@@ -446,7 +447,7 @@ def getSpellLengths(inarray):
 def index_to_bboxCross(index, mins, maxes):
     return ((mins <= index) & (maxes >=index)).sum()
     
-def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
+def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32):
     # Prepare image
     _, img_cv = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
     img01 = img_cv.astype(precision)/255
@@ -473,58 +474,116 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     features['global_colAvg_p0'], features['global_colAvg_p5'], features['global_colAvg_p10'] = np.percentile(features['col_avg'], q=[0, 5, 10])
 
     # Features | Text       
+    # Features | Text | Text like start
+    # Features | Text | Text like start | Identify words with text like start of row/col
+    textDf = textDf_table.sort_values(by=['blockno', 'lineno', 'wordno']).drop(columns=['wordno', 'ocrLabel', 'conf']).reset_index(drop=True)
+    textDf['lineno_seq'] = (textDf['blockno']*1000 + textDf['lineno']).rank(method='dense').astype(int)
+    textDf['text_like_start_row'] = ((textDf['text'].str[0].str.isupper()) | (textDf['text'].str[0].str.isdigit()) | (textDf['text'].str[:5].str.contains(r'[\.\)\-]', regex=True)) )*1
+    
     # Features | Text | Text like rowstart
-    # Features | Text | Text like rowstart | Identify lines with text like rowstart
-    textDf_CoN = textDf.sort_values(by=['blockno', 'lineno', 'wordno']).drop_duplicates(subset=['blockno', 'lineno'], keep='first').drop(columns=['left', 'right', 'blockno', 'wordno', 'ocrLabel', 'conf']).reset_index(drop=True)
-    textDf_CoN['lineno_seq'] = textDf_CoN['lineno'].rank().astype(int)
-    textDf_CoN['text_like_rowstart'] = (textDf_CoN['text'].str[0].str.isupper() | textDf_CoN['text'].str[0].str.isdigit() | textDf_CoN['text'].str[:5].str.contains(r'[\.\)\-]', regex=True) )*1
-    textDf_CoN = textDf_CoN.drop_duplicates(subset='top', keep='first')
-
-    # Features | Text | Text like rowstart | Generate indicator
-    # Features | Text | Text like rowstart | Generate indicator | Gather info on next line
-    textDf_CoN['F1_text_like_rowstart'] = textDf_CoN['text_like_rowstart'].shift(periods=-1).fillna(1).astype(int)
-
-    # Features | Text | Text like rowstart | Generate indicator | Assign lines to img rows
-    rowTextDf = pd.DataFrame(data=np.arange(img01.shape[0], dtype=np.int32), columns=['top'])
-    rowTextDf = pd.merge_asof(left=rowTextDf, right=textDf_CoN[['top', 'bottom', 'lineno', 'lineno_seq']], left_on='top', right_on='top', direction='backward')
-    rowTextDf['lineno_seq'] = rowTextDf['lineno_seq'].fillna(value=0)                                             # Before first text: 0
-    rowTextDf.loc[rowTextDf['top'] > rowTextDf['bottom'].max(), 'lineno_seq'] = rowTextDf['lineno_seq'].max() + 1       # After  last  text: max + 1
-    lastLineNo = rowTextDf['lineno_seq'].max()
-
-    # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines
-    rowTextDf['between_textlines'] = rowTextDf['top'] > rowTextDf['bottom']
-    rowTextDf.loc[rowTextDf['lineno_seq'] == lastLineNo, 'between_textlines'] = False
+    # Features | Text | Text like rowstart | Identify rows with text like start
+    textDf_line = textDf.drop_duplicates(subset=['blockno', 'lineno'], keep='first').drop(columns=['blockno', 'left', 'right'])
+    textDf_line = textDf_line.drop_duplicates(subset='top', keep='first').reset_index(drop=True)
     
-    # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines | For the start and end lines, set everything that isn't padding to separator
-    firstNonWhite_line0 = np.where(features['row_avg'][rowTextDf.loc[rowTextDf['lineno_seq'] == 0].index] < 1)[0][0]
-    rowTextDf.loc[(rowTextDf.index >= firstNonWhite_line0) & (rowTextDf['lineno_seq'] == 0), 'between_textlines'] = True
+    # Features | Text | Text like rowstart | Gather info on next line
+    textDf_line['F1_text_like_start_row'] = textDf_line['text_like_start_row'].shift(periods=-1).fillna(1).astype(int)
+    textDf_line = textDf_line.sort_values(by=['top', 'bottom', 'lineno', 'lineno_seq']).astype({'lineno_seq': int})
 
-    lastNonWhite_lineLast = np.where(np.flip(features['row_avg'][rowTextDf.loc[rowTextDf['lineno_seq'] == rowTextDf['lineno_seq'].max()].index]) < 1)[0][0]       # distance from end
-    rowTextDf.loc[(rowTextDf.index <= len(rowTextDf.index)-lastNonWhite_lineLast) & (rowTextDf['lineno_seq'] == rowTextDf['lineno_seq'].max()), 'between_textlines'] = True
+    # Features | Text | Text like rowstart | Assign lines to img rows
+    textDf_row = pd.DataFrame(data=np.arange(img01.shape[0], dtype=np.int32), columns=['top'])
+    textDf_row = pd.merge_asof(left=textDf_row, right=textDf_line[['top', 'bottom', 'lineno', 'lineno_seq']], left_on='top', right_on='top', direction='backward')
+    textDf_row['lineno_seq'] = textDf_row['lineno_seq'].fillna(value=0)                                                     # Before first text: 0
+    textDf_row.loc[textDf_row['top'] > textDf_row['bottom'].max(), 'lineno_seq'] = textDf_row['lineno_seq'].max() + 1       # After  last  text: max + 1
+    lastLineNo = textDf_row['lineno_seq'].max()
 
-    # Features | Text | Text like rowstart | Generate indicator | Identify 'img rows' between text lines | Assign half of separator to neighbouring lines (so we can verify that all lines contain separators)
-    lastRow_line0 = rowTextDf.loc[rowTextDf['lineno_seq'] == 0].index.max()
+    # Features | Text | Text like rowstart | Identify 'img rows' between text lines
+    textDf_row['between_textlines'] = textDf_row['top'] > textDf_row['bottom']
+    textDf_row.loc[textDf_row['lineno_seq'] == lastLineNo, 'between_textlines'] = False
+    
+    # Features | Text | Text like rowstart | Identify 'img rows' between text lines | For the start and end lines, set everything that isn't padding to separator (edge case of all padding: 1/5th set to separator)
+    height_line0 = textDf_row.loc[textDf_row['lineno_seq'] == 0].index.max()
+    try:
+        firstNonWhite_line0 = np.where(features['row_avg'][textDf_row.loc[textDf_row['lineno_seq'] == 0].index] < 1)[0][0]
+    except IndexError:
+        firstNonWhite_line0 = height_line0
+    countNonWhite_line0 = height_line0 - firstNonWhite_line0
+
+    if countNonWhite_line0:
+        textDf_row.loc[(textDf_row.index >= firstNonWhite_line0) & (textDf_row['lineno_seq'] == 0), 'between_textlines'] = True
+    else:
+        textDf_row.loc[(textDf_row.index >= (height_line0 // 5 * 4)) & (textDf_row['lineno_seq'] == 0), 'between_textlines'] = True
+
+    try:
+        lastNonWhite_lineLast = np.where(np.flip(features['row_avg'][textDf_row.loc[textDf_row['lineno_seq'] == textDf_row['lineno_seq'].max()].index]) < 1)[0][0]       # distance from end
+    except IndexError:
+        height_lineLast = textDf_row.loc[textDf_row['lineno_seq'] == lastLineNo, 'lineno_seq'].count()
+        lastNonWhite_lineLast = height_lineLast // 5
+    textDf_row.loc[(textDf_row.index <= len(textDf_row.index)-lastNonWhite_lineLast) & (textDf_row['lineno_seq'] == textDf_row['lineno_seq'].max()), 'between_textlines'] = True
+
+    # Features | Text | Text like rowstart | Identify 'img rows' between text lines | Assign half of separator to neighbouring lines (so we can verify that all lines contain separators)
+    lastRow_line0 = textDf_row.loc[textDf_row['lineno_seq'] == 0].index.max()
     middleOfSeparator_line0 = firstNonWhite_line0 + (lastRow_line0 - firstNonWhite_line0) // 2
-    rowTextDf.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1
+    textDf_row.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1
 
-    firstRow_lineLast = rowTextDf.loc[rowTextDf['lineno_seq'] == lastLineNo].index.min()
-    separatorRowCount_lineLast = rowTextDf.loc[(rowTextDf['lineno_seq'] == lastLineNo), 'between_textlines'].sum()
+    firstRow_lineLast = textDf_row.loc[textDf_row['lineno_seq'] == lastLineNo].index.min()
+    separatorRowCount_lineLast = textDf_row.loc[(textDf_row['lineno_seq'] == lastLineNo), 'between_textlines'].sum()
     middleOfSeparator_lineLast = firstRow_lineLast + (separatorRowCount_lineLast // 2)
-    rowTextDf.loc[firstRow_lineLast:middleOfSeparator_lineLast+1, 'lineno_seq'] = lastLineNo - 1
+    textDf_row.loc[firstRow_lineLast:middleOfSeparator_lineLast+1, 'lineno_seq'] = lastLineNo - 1
     
-    rowTextDf.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1  
+    textDf_row.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1  
+    textDf_row['lineno_seq'] = textDf_row['lineno_seq'].astype(int)
     
-    betweenText_max_per_line = rowTextDf.groupby('lineno_seq')['between_textlines'].transform(max)
-    if betweenText_max_per_line.min() == False:
-        raise Exception('Not all lines contain separators')
+    # betweenText_max_per_line = textDf_row.groupby('lineno_seq')['between_textlines'].transform(max)
+    # if betweenText_max_per_line.min() == False:
+    #     raise Exception('Not all lines contain separators')
 
-    # Features | Text | Text like rowstart | Generate indicator | Merge text_like_rowstart info
-    rowTextDf = rowTextDf.merge(right=textDf_CoN[['lineno_seq', 'text_like_rowstart', 'F1_text_like_rowstart']], left_on='lineno_seq', right_on='lineno_seq')
-    rowTextDf['between_textlines_like_rowstart'] = rowTextDf['between_textlines'] & rowTextDf['F1_text_like_rowstart']
+    # Features | Text | Text like rowstart | Merge textline-level text_like_start_row info
+    textDf_row = textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row']], left_on='lineno_seq', right_on='lineno_seq', how='outer').fillna({'F1_text_like_start_row': 1})
+    textDf_row['between_textlines_like_rowstart'] = textDf_row['between_textlines'] & textDf_row['F1_text_like_start_row']
 
-    # Features | Text | Text like rowstart | Generate indicator | Add to features
-    features['row_between_textlines']               = rowTextDf['between_textlines'].to_numpy().astype(np.uint8)
-    features['row_between_textlines_like_rowstart'] = rowTextDf['between_textlines_like_rowstart'].to_numpy().astype(np.uint8)
+    # Features | Text | Text like rowstart | Add to features
+    features['row_between_textlines']               = textDf_row['between_textlines'].to_numpy().astype(np.uint8)
+    features['row_between_textlines_like_rowstart'] = textDf_row['between_textlines_like_rowstart'].to_numpy().astype(np.uint8)
+
+    # Features | Text | Text like colstart
+    # Features | Text | Text like colstart | Count for each column how often the nearest row to its right contains start-like text
+    def convert_bbox_to_array_value(row, target_array):
+        '''Fills in elements of bbox in target_array with 255 if bbox contains text_like_start_col, otherwise fills in 128'''
+        if row['text_like_start_col']:
+            fill = 255
+        else:
+            fill = 128
+
+        top, bottom, left, right = row['top'], row['bottom'], row['left'], row['right']
+        target_array[top:bottom+1, left:right+1] = fill
+
+    def count_nearest_right_values(in_array, values_to_count):
+        counts = {value_to_count: np.zeros(shape=in_array.shape[1]) for value_to_count in values_to_count}
+
+        for colNumber in range(in_array.shape[1]):        # colNumber = 0
+            right_of_col_array = np.ndarray.view(in_array)[:, colNumber+1:]                            # Reduce array to elements to the right of the col
+            try:
+                # (maybe) TD: only include values at the x-th percentile of the indexes
+                firstnonzero_in_row_index = (right_of_col_array != 0).argmax(axis=1)                                                # Get index of first non-zero element per row
+                firstnonzero_in_row_value = right_of_col_array[np.arange(right_of_col_array.shape[0]), firstnonzero_in_row_index]   # Get value of first non-zero element per row
+            except ValueError:
+                firstnonzero_in_row_value = np.zeros(shape=in_array.shape[0])                                                       # Handle case of last col (no values to the right) > always zero
+            for value_to_count in values_to_count:
+                counts[value_to_count][colNumber] = (firstnonzero_in_row_value == value_to_count).sum()                             # Count occurence of each relevant value
+
+        return counts
+
+    text_like_start_array = np.zeros_like(img01, dtype=np.uint32)
+    textDf['text_like_start_col'] = ((textDf['text'].str[0].str.isupper()) | (textDf['text'].str[0].str.isdigit()) | ((textDf['text'].str[0].isin(['.', '(', ')', '-'])) & (textDf['text'].str.len() > 1)) )*1
+    textDf.apply(lambda row: convert_bbox_to_array_value(row=row, target_array=text_like_start_array), axis=1)     # Modifies text_like_start_array
+    counts = count_nearest_right_values(text_like_start_array, values_to_count=[128, 255])
+
+    nearest_right_is_text = (counts[128]+counts[255]).astype(np.uint32)
+    nearest_right_is_text[nearest_right_is_text == 0] = 1
+    nearest_right_is_startlike_share = counts[255]/nearest_right_is_text
+    
+    # Features | Text | Text like colstart | Add to features
+    features['col_nearest_right_is_startlike_share'] = nearest_right_is_startlike_share    
 
     # Features | Text | Words crossed per row/col
     textDf_WC = textDf.copy().sort_values(by=['left', 'top', 'right', 'bottom'])
@@ -536,12 +595,23 @@ def imgAndWords_to_features(img, textDf:pd.DataFrame, precision=np.float32):
     features['row_wordsCrossed_relToMax'] = features['row_wordsCrossed_count'] / features['row_wordsCrossed_count'].max() if features['row_wordsCrossed_count'].max() != 0 else features['row_wordsCrossed_count']
     features['col_wordsCrossed_relToMax'] = features['col_wordsCrossed_count'] / features['col_wordsCrossed_count'].max() if features['col_wordsCrossed_count'].max() != 0 else features['col_wordsCrossed_count']
 
+    # Features | Text | Outside text rectangle
+    textRectangle = {}
+    textRectangle['left'] = textDf['left'].min()
+    textRectangle['top'] = textDf['top'].min()
+    textRectangle['right'] = textDf['right'].max()
+    textRectangle['bottom'] = textDf['bottom'].max()
+
+    row_in_textrectangle = np.zeros(shape=img01.shape[0], dtype=np.uint8); row_in_textrectangle[textRectangle['top']:textRectangle['bottom']+1] = 1
+    col_in_textrectangle = np.zeros(shape=img01.shape[1], dtype=np.uint8); col_in_textrectangle[textRectangle['left']:textRectangle['right']+1] = 1
+
+    features['row_in_textrectangle'] = row_in_textrectangle
+    features['col_in_textrectangle'] = col_in_textrectangle
+
     # Return
     return img01, img_cv, features
 
 def vocLabels_to_groundTruth(pathLabel, img):
-    # Image
-    
     # Parse xml
     root = etree.parse(pathLabel)
     objectCount = len(root.findall('.//object'))
@@ -593,8 +663,8 @@ def processPdf(pdfName):
 
         # Get text on page
         pathWordsFile = pathWords / f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}.pq'
-        textDf = pd.read_parquet(pathWordsFile)
-        textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']] * (DPI_PYMUPDF / DPI_OCR)
+        textDf_page = pd.read_parquet(pathWordsFile).drop_duplicates()
+        textDf_page[['left', 'right', 'top', 'bottom']] = textDf_page[['left', 'right', 'top', 'bottom']] * (DPI_PYMUPDF / DPI_OCR)
 
         # Loop over tables
         for tableIteration, _ in enumerate(fitzBoxes):
@@ -614,27 +684,31 @@ def processPdf(pdfName):
 
             # Process text
             # Process text | Reduce to table bbox
-            textDf = textDf.loc[(textDf['top'] >= tableRect.y0) & (textDf['left'] >= tableRect.x0) & (textDf['bottom'] <= tableRect.y1) & (textDf['right'] <= tableRect.x1)]        # clip to table
+            textDf_table = textDf_page.loc[(textDf_page['top'] >= tableRect.y0) & (textDf_page['left'] >= tableRect.x0) & (textDf_page['bottom'] <= tableRect.y1) & (textDf_page['right'] <= tableRect.x1)]        # clip to table
 
             # Process text | Convert to padded table image pixel coordinates
-            textDf[['left', 'right']] = textDf[['left', 'right']] - tableRect.x0
-            textDf[['top', 'bottom']] = textDf[['top', 'bottom']] - tableRect.y0
-            textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']] * (DPI_TARGET / DPI_PYMUPDF) + PADDING
-            textDf[['left', 'right', 'top', 'bottom']] = textDf[['left', 'right', 'top', 'bottom']].round(0).astype(int)
+            textDf_table[['left', 'right']] = textDf_table[['left', 'right']] - tableRect.x0
+            textDf_table[['top', 'bottom']] = textDf_table[['top', 'bottom']] - tableRect.y0
+            textDf_table[['left', 'right', 'top', 'bottom']] = textDf_table[['left', 'right', 'top', 'bottom']] * (DPI_TARGET / DPI_PYMUPDF) + PADDING
+            textDf_table[['left', 'right', 'top', 'bottom']] = textDf_table[['left', 'right', 'top', 'bottom']].round(0).astype(int)
 
             # Generate features
-            if 'conf' not in textDf.columns:
-                textDf['conf'] = 100
-            img01, img_cv, features = imgAndWords_to_features(img=img, textDf=textDf)
+            if 'conf' not in textDf_table.columns:
+                textDf_table['conf'] = 100
+            img01, img_cv, features = imgAndWords_to_features(img=img, textDf_table=textDf_table)
 
-            t = textDf.copy()
-            t['topI'] = t['top'].astype(int)
-
-            # Extract ground truths
+            # Extract ground truths     # adjust to word positions
             gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01)
 
             # Save
             # Save | Visual
+            def convert_01_array_to_visual(array, invert=False, width=40) -> np.array:
+                luminosity = (1 - array) * LUMINOSITY_GT_FEATURES_MAX if invert else array * LUMINOSITY_GT_FEATURES_MAX
+                luminosity = luminosity.round(0).astype(np.uint8)
+                luminosity = np.expand_dims(luminosity, axis=1)
+                luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
+                return luminosity
+
             # Save | Visual | Image
             pathOut_img = str(pathOut_all / 'images' / f'{tableName}.jpg')
             cv.imwrite(filename=pathOut_img, img=img_cv)
@@ -642,46 +716,49 @@ def processPdf(pdfName):
             # Save | Visual | Image with ground truth and text feature
             pathOut_img_gt_text = str(pathOut_all / 'images_text_and_gt' / f'{tableName}.jpg')
             img_annot = img_cv.copy()
+            row_annot = []
+            col_annot = []
 
             # Save | Visual | Image with ground truth and text feature | Ground truth
-            indicator_gt_row = np.expand_dims(gt['row'], axis=1)
-            indicator_gt_row = np.broadcast_to(indicator_gt_row, shape=[indicator_gt_row.shape[0], 40])
-            indicator_gt_row = indicator_gt_row * 140
-            img_annot = np.concatenate([img_annot, indicator_gt_row], axis=1)
+            indicator_gt_row = convert_01_array_to_visual(gt['row'])
+            row_annot.append(indicator_gt_row)
 
-            indicator_gt_col = np.expand_dims(gt['col'], axis=1)
-            indicator_gt_col = np.broadcast_to(indicator_gt_col, shape=[indicator_gt_col.shape[0], 40])
-            indicator_gt_col = indicator_gt_col * 140
-            indicator_gt_col = indicator_gt_col.T
-            indicator_gt_col = np.concatenate([indicator_gt_col, np.full(fill_value=LUMINOSITY_FILLER, shape=(indicator_gt_col.shape[0], indicator_gt_row.shape[1]))], axis=1)
-            img_annot = np.concatenate([img_annot, indicator_gt_col], axis=0)
+            indicator_gt_col = convert_01_array_to_visual(gt['col'])
+            col_annot.append(indicator_gt_col)
 
             # Save | Visual | Image with ground truth and text feature | Text Feature
-            # Save | Visual | Image with ground truth and text feature | Text Feature | Words crossed
-            wc_row = features['row_wordsCrossed_relToMax']
-            wc_row = np.expand_dims(wc_row, 1)
-            wc_row = (wc_row * 255).astype(np.uint8)
-            wc_row = np.broadcast_to(wc_row, shape=[wc_row.shape[0], 40])
-            wc_row = np.concatenate([wc_row, np.full(fill_value=LUMINOSITY_FILLER, shape=((img_annot.shape[0] - wc_row.shape[0]), wc_row.shape[1]))], axis=0)
-            img_annot = np.concatenate([img_annot, wc_row], axis=1)
+            # Save | Visual | Image with ground truth and text feature | Text Feature | Text rectangle
+            row_in_textrectangle = convert_01_array_to_visual(features['row_in_textrectangle'], width=20)
+            row_annot.append(row_in_textrectangle)
 
-            wc_col = features['col_wordsCrossed_relToMax']
-            wc_col = np.expand_dims(wc_col, 1)
-            wc_col = (wc_col * 255).astype(np.uint8)
-            wc_col = np.broadcast_to(wc_col, shape=[wc_col.shape[0], 40])
-            wc_col = wc_col.T
-            wc_col = np.concatenate([wc_col, np.full(fill_value=LUMINOSITY_FILLER, shape=(wc_col.shape[0], (img_annot.shape[1] - wc_col.shape[1])))], axis=1)
-            img_annot = np.concatenate([img_annot, wc_col], axis=0)
+            col_in_textrectangle = convert_01_array_to_visual(features['col_in_textrectangle'], width=20)
+            col_annot.append(col_in_textrectangle)
+            
+            # Save | Visual | Image with ground truth and text feature | Text Feature | Textline like rowstart
+            indicator_textline_like_rowstart = convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20)
+            row_annot.append(indicator_textline_like_rowstart)
 
-            # Save | Visual | Image with ground truth and text feature | Text Feature | Capital or Numeric
-            indicator_capitalOrNumeric = np.expand_dims(features['row_firstletter_capitalOrNumeric'], 1)
-            indicator_capitalOrNumeric = np.broadcast_to(indicator_capitalOrNumeric, shape=[indicator_capitalOrNumeric.shape[0], 20])
-            indicator_capitalOrNumeric = indicator_capitalOrNumeric * 200
-            indicator_capitalOrNumeric = np.concatenate([indicator_capitalOrNumeric, np.full(fill_value=LUMINOSITY_FILLER, shape=((img_annot.shape[0] - indicator_capitalOrNumeric.shape[0]), indicator_capitalOrNumeric.shape[1])) ], axis=0)
-            img_annot = np.concatenate([img_annot, indicator_capitalOrNumeric], axis=1)
+            # Save | Visual | Image with ground truth and text feature | Text Feature | Nearest right is startlike
+            indicator_nearest_right_is_startlike = convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20)
+            col_annot.append(indicator_nearest_right_is_startlike)
 
+            # Save | Visual | Image with ground truth and text feature | Text Feature | Words crossed (lighter = fewer words crossed)
+            wc_row = convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20)
+            row_annot.append(wc_row)
+
+            wc_col = convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
+            col_annot.append(wc_col)
+
+            # Save | Visual | Add row, column and filler
+            row_annot = np.concatenate(row_annot, axis=1)
+            img_annot = np.concatenate([img_annot, row_annot], axis=1)
+
+            col_annot = np.concatenate(col_annot, axis=1).T
+            col_annot = np.concatenate([col_annot, np.full(shape=(col_annot.shape[0], row_annot.shape[1]), fill_value=LUMINOSITY_FILLER, dtype=np.uint8)], axis=1)
+            img_annot = np.concatenate([img_annot, col_annot], axis=0)
             cv.imwrite(filename=pathOut_img_gt_text, img=img_annot)
             
+
             # Save | Features
             pathOut_features = pathOut_all / 'features' / f'{tableName}.json'
             with open(pathOut_features, 'w') as featureFile:
