@@ -165,8 +165,6 @@ def findClosestSeparators(rowSeparatorBboxes, colSeparatorBboxes, cellBbox):
 
     return cellBbox_new
 
-
-
 def isCellSeparatorEdge(separatorBbox, cellBbox, orientation:Literal['row', 'column']) -> bool:
     minCoord = 'ymin' if orientation == 'row' else 'xmin'
     maxCoord = 'ymax' if orientation == 'row' else 'xmax'

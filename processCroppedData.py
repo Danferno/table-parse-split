@@ -23,8 +23,7 @@ np.seterr(all='raise')
 # Constants
 DEBUG = False
 PARALLEL = False
-SEPARATOR_TYPE = 'wide'
-COMPLEXITY_SUFFIX = 'wide'
+SEPARATOR_TYPE = 'narrow'
 
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA_TABLEDETECT = Path(r"F:\ml-parsing-project\data")
@@ -35,6 +34,7 @@ DPI_OCR = 300
 PADDING = 40
 LINENO_GAP = 5
 PRECISION = np.float32
+ADJUST_LABELS_TO_TEXTLINES = True
 
 LANGUAGES = 'nld+fra+deu+eng'
 OCR_TYPES = ['tesseract_fitz', 'tesseract_fast', 'tesseract_legacy', 'easyocr']
@@ -61,7 +61,7 @@ pathPdfs_local = PATH_ROOT / 'data' / 'pdfs'
 pathOcr = PATH_ROOT / 'data' / 'ocr'
 pathWords = PATH_ROOT / 'data' / 'words'
 
-pathOut = PATH_ROOT / 'data' / f'real_{COMPLEXITY_SUFFIX}'
+pathOut = PATH_ROOT / 'data' / f'real_{SEPARATOR_TYPE}'
 pathOut_all = pathOut / 'all'
 
 def replaceDirs(path):
@@ -94,11 +94,15 @@ class NumpyEncoder(json.JSONEncoder):
 tablesplit_labelFiles = list(os.scandir(pathLabels_tablesplit))
 pdfFilenames = set([f"{fileEntry.name.split('-p')[0]}.pdf" for fileEntry in tablesplit_labelFiles])
 for pdfName in tqdm(pdfFilenames, desc='Copying pdf files to local folder'):
+    if os.path.exists(pathPdfs_local / pdfName):
+        continue
     _ = shutil.copyfile(src=pathPdfs_in / pdfName, dst=pathPdfs_local / pdfName)
 
 # Gather | tabledetect labels
 tabledetectFilenames = set([f"{fileEntry.name.split('_t')[0]}.txt" for fileEntry in tablesplit_labelFiles])
 for tabledetectFilename in tqdm(tabledetectFilenames, desc='Copying tabledetect labels to local folder'):
+    if os.path.exists(pathLabels_tabledetect_local / tabledetectFilename):
+        continue
     _ = shutil.copyfile(src=pathLabels_tabledetect_in / tabledetectFilename, dst=pathLabels_tabledetect_local / tabledetectFilename)
 
 # Gather | tabledetect labels by pdf
@@ -611,7 +615,39 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     # Return
     return img01, img_cv, features
 
-def vocLabels_to_groundTruth(pathLabel, img):
+def adjust_initialBoundaries_to_betterBoundariesB(arrayInitial, arrayBetter):
+    arrayBetter_idx = 0
+    startBetter, endBetter = arrayBetter[arrayBetter_idx]
+    endBetter_max = arrayBetter[:,1].max()
+
+    for arrayInitial_idx, (startInitial, endInitial) in enumerate(arrayInitial):     # startInitial, endInitial = arrayInitial[0]
+        # Advance to next better boundary: if better boundary is fully to the left of initial boundary
+        while (startInitial > endBetter):
+            arrayBetter_idx += 1
+            try:
+                startBetter, endBetter = arrayBetter[arrayBetter_idx]
+            except IndexError:
+                break
+
+            if (startInitial > endBetter_max):
+                break
+        
+        # Advance to next initial boundary: if better boundary is fully to the right of initial boundary
+        if (endInitial < startBetter):
+            continue
+
+        # Update to better: if initial boundary overlaps better boundary
+        else:
+            arrayInitial[arrayInitial_idx] = (startBetter, endBetter)
+    
+    return arrayInitial
+
+def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]), adjust_labels_to_textboxes=False):
+    # Parse textbox-information
+    if adjust_labels_to_textboxes:
+        textline_boundaries = np.diff(row_between_textlines.astype(np.int8), append=0)
+        textline_boundaries = np.column_stack([np.where(textline_boundaries == 1)[0], np.where(textline_boundaries == -1)[0]])
+    
     # Parse xml
     root = etree.parse(pathLabel)
     objectCount = len(root.findall('.//object'))
@@ -623,6 +659,9 @@ def vocLabels_to_groundTruth(pathLabel, img):
         # Get separator locations
         row_separators = [(int(row.find('.//ymin').text), int(row.find('.//ymax').text)) for row in rows]
         row_separators = sorted(row_separators, key= lambda x: x[0])
+
+        if adjust_labels_to_textboxes:
+            row_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=row_separators, arrayBetter=textline_boundaries)
 
         col_separators = [(int(col.find('.//xmin').text), int(col.find('.//xmax').text)) for col in cols]
         col_separators = sorted(col_separators, key= lambda x: x[0])
@@ -639,6 +678,7 @@ def vocLabels_to_groundTruth(pathLabel, img):
         gt_row = np.zeros(shape=img.shape[0], dtype=np.uint8)
         gt_col = np.zeros(shape=img.shape[1], dtype=np.uint8)
     
+    # Adjust to textboxes
     gt = {}
     gt['row'] = gt_row
     gt['col'] = gt_col
@@ -698,7 +738,7 @@ def processPdf(pdfName):
             img01, img_cv, features = imgAndWords_to_features(img=img, textDf_table=textDf_table)
 
             # Extract ground truths     # adjust to word positions
-            gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01)
+            gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01, row_between_textlines=features['row_between_textlines'], adjust_labels_to_textboxes=ADJUST_LABELS_TO_TEXTLINES)
 
             # Save
             # Save | Visual
@@ -718,13 +758,6 @@ def processPdf(pdfName):
             img_annot = img_cv.copy()
             row_annot = []
             col_annot = []
-
-            # Save | Visual | Image with ground truth and text feature | Ground truth
-            indicator_gt_row = convert_01_array_to_visual(gt['row'])
-            row_annot.append(indicator_gt_row)
-
-            indicator_gt_col = convert_01_array_to_visual(gt['col'])
-            col_annot.append(indicator_gt_col)
 
             # Save | Visual | Image with ground truth and text feature | Text Feature
             # Save | Visual | Image with ground truth and text feature | Text Feature | Text rectangle
@@ -749,13 +782,31 @@ def processPdf(pdfName):
             wc_col = convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
             col_annot.append(wc_col)
 
-            # Save | Visual | Add row, column and filler
+            # Save | Visual | Image with ground truth and text feature | Add feature bars
             row_annot = np.concatenate(row_annot, axis=1)
             img_annot = np.concatenate([img_annot, row_annot], axis=1)
 
             col_annot = np.concatenate(col_annot, axis=1).T
             col_annot = np.concatenate([col_annot, np.full(shape=(col_annot.shape[0], row_annot.shape[1]), fill_value=LUMINOSITY_FILLER, dtype=np.uint8)], axis=1)
             img_annot = np.concatenate([img_annot, col_annot], axis=0)
+
+            # Save | Visual | Image with ground truth and text feature | Add ground truth
+            indicator_gt_row = convert_01_array_to_visual(gt['row'], width=img_annot.shape[1])
+            img_rowgt = np.zeros((*img_annot.shape, 3))
+            img_rowgt[:indicator_gt_row.shape[0], :indicator_gt_row.shape[1], 2] = indicator_gt_row
+
+            alpha = 0.6
+            test = cv.addWeighted(img_annot, alpha, img_rowgt, 1-alpha, 0)
+
+
+            img_annot_rowgt.rectangle(xy=annotation['xy'], fill=label_color_transparent, outline=label_color_outline, width=annotation['width'])
+
+
+            
+            row_annot.append(indicator_gt_row)
+
+            indicator_gt_col = convert_01_array_to_visual(gt['col'])
+            col_annot.append(indicator_gt_col)
             cv.imwrite(filename=pathOut_img_gt_text, img=img_annot)
             
 
