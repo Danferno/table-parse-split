@@ -1,3 +1,4 @@
+# Run collectTableparsedata script first (this script requires all albels in 'ml/data/labels' folder)
 # Imports
 import os
 from pathlib import Path
@@ -34,13 +35,18 @@ pathLabels_separators_wide = PATH_DATA / 'labels' / 'wide'
 pathLabels_yolo = PATH_DATA / 'labels_yolo'
 pathErrors = PATH_DATA / 'errors' / f"{datetime.now().strftime('%Y_%m_%d-%H_%M')}.tsv"
 
-if os.path.exists(PATH_DATA):
-    shutil.rmtree(PATH_DATA)
-    os.makedirs(PATH_DATA)
-os.makedirs(pathLabels_separators_narrow)
-os.makedirs(pathLabels_separators_wide)
-os.makedirs(pathLabels_yolo)
-os.makedirs(pathErrors.parent)
+def replaceDirs(path):
+    try:
+        os.makedirs(path)
+    except FileExistsError:
+        shutil.rmtree(path)
+        os.makedirs(path)
+
+os.makedirs(PATH_DATA, exist_ok=True)
+replaceDirs(pathLabels_separators_narrow)
+replaceDirs(pathLabels_separators_wide)
+replaceDirs(pathLabels_yolo)
+replaceDirs(pathErrors.parent)
 
 
 # Errors
@@ -221,7 +227,16 @@ def writeBboxToXml(bboxes:list, xmlRoot:etree.Element, label:str):
 
 # Convert row/column annotations to separator annotations
 labelFiles = list(os.scandir(pathLabels))
+with open(PATH_IN / PROJECT / 'rotated_images.txt', 'r') as file:
+    rotatedFiles = [line.strip() for line in file.readlines()]
+
 for labelFileEntry in tqdm(labelFiles):       # labelFileEntry = labelFiles[0]
+    # Skip rotated images
+    rotated = any([rotatedFilename in labelFileEntry.name for rotatedFilename in rotatedFiles])
+    if rotated:
+        print('Skipping rotated file')
+        continue
+    
     faultyAnnotation = []
 
     # Image | Convert to monochrome B/W
@@ -391,5 +406,5 @@ def voc_to_yolo(vocPath, outPath, classMap:str):
     with open(outPath.parent / 'yolo_classes.json', 'w') as f:
         json.dump(classMap, f, indent=1)
 
-CLASS_MAP = {'row separator': 0, 'column separator': 1, 'spanning cell interior': 2}
-voc_to_yolo(pathLabels_separators_wide, outPath=pathLabels_yolo, classMap=CLASS_MAP)
+# CLASS_MAP = {'row separator': 0, 'column separator': 1, 'spanning cell interior': 2}
+# voc_to_yolo(pathLabels_separators_wide, outPath=pathLabels_yolo, classMap=CLASS_MAP)
