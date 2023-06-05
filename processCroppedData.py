@@ -537,9 +537,10 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     textDf_row.loc[middleOfSeparator_line0:lastRow_line0+1, 'lineno_seq'] = 1  
     textDf_row['lineno_seq'] = textDf_row['lineno_seq'].astype(int)
     
-    # betweenText_max_per_line = textDf_row.groupby('lineno_seq')['between_textlines'].transform(max)
-    # if betweenText_max_per_line.min() == False:
-    #     raise Exception('Not all lines contain separators')
+    if DEBUG:
+        betweenText_max_per_line = textDf_row.groupby('lineno_seq')['between_textlines'].transform(max)
+        if betweenText_max_per_line.min() == False:
+            raise Exception('Not all lines contain separators')
 
     # Features | Text | Text like rowstart | Merge textline-level text_like_start_row info
     textDf_row = textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row']], left_on='lineno_seq', right_on='lineno_seq', how='outer').fillna({'F1_text_like_start_row': 1})
@@ -585,8 +586,6 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     nearest_right_is_text = (counts[128]+counts[255]).astype(np.uint32)
     nearest_right_is_text[nearest_right_is_text == 0] = 1
     nearest_right_is_startlike_share = counts[255]/nearest_right_is_text
-    
-    # Features | Text | Text like colstart | Add to features
     features['col_nearest_right_is_startlike_share'] = nearest_right_is_startlike_share    
 
     # Features | Text | Words crossed per row/col
@@ -642,11 +641,17 @@ def adjust_initialBoundaries_to_betterBoundariesB(arrayInitial, arrayBetter):
     
     return arrayInitial
 
-def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]), adjust_labels_to_textboxes=False):
+def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]), col_wordsCrossed_relToMax=np.array([]), adjust_labels_to_textboxes=False):
     # Parse textbox-information
     if adjust_labels_to_textboxes:
-        textline_boundaries = np.diff(row_between_textlines.astype(np.int8), append=0)
-        textline_boundaries = np.column_stack([np.where(textline_boundaries == 1)[0], np.where(textline_boundaries == -1)[0]])
+        # Row
+        textline_boundaries_horizontal = np.diff(row_between_textlines.astype(np.int8), append=0)
+        textline_boundaries_horizontal = np.column_stack([np.where(textline_boundaries_horizontal == 1)[0], np.where(textline_boundaries_horizontal == -1)[0]])
+
+        # Column
+        textline_boundaries_vertical = np.diff((col_wordsCrossed_relToMax < 0.001).astype(np.int8), append=0)
+        textline_boundaries_vertical[0] = 1
+        textline_boundaries_vertical = np.column_stack([np.where(textline_boundaries_vertical == 1)[0], np.where(textline_boundaries_vertical == -1)[0]])
     
     # Parse xml
     root = etree.parse(pathLabel)
@@ -661,10 +666,12 @@ def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]),
         row_separators = sorted(row_separators, key= lambda x: x[0])
 
         if adjust_labels_to_textboxes:
-            row_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=row_separators, arrayBetter=textline_boundaries)
+            row_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=row_separators, arrayBetter=textline_boundaries_horizontal)
 
         col_separators = [(int(col.find('.//xmin').text), int(col.find('.//xmax').text)) for col in cols]
         col_separators = sorted(col_separators, key= lambda x: x[0])
+        if adjust_labels_to_textboxes:
+            col_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=col_separators, arrayBetter=textline_boundaries_vertical)
 
         # Create ground truth arrays
         gt_row = np.zeros(shape=img.shape[0], dtype=np.uint8)
@@ -738,7 +745,7 @@ def processPdf(pdfName):
             img01, img_cv, features = imgAndWords_to_features(img=img, textDf_table=textDf_table)
 
             # Extract ground truths     # adjust to word positions
-            gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01, row_between_textlines=features['row_between_textlines'], adjust_labels_to_textboxes=ADJUST_LABELS_TO_TEXTLINES)
+            gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01, row_between_textlines=features['row_between_textlines'], col_wordsCrossed_relToMax=features['col_wordsCrossed_relToMax'], adjust_labels_to_textboxes=ADJUST_LABELS_TO_TEXTLINES)
 
             # Save
             # Save | Visual
@@ -754,7 +761,7 @@ def processPdf(pdfName):
             cv.imwrite(filename=pathOut_img, img=img_cv)
 
             # Save | Visual | Image with ground truth and text feature
-            pathOut_img_gt_text = str(pathOut_all / 'images_text_and_gt' / f'{tableName}.jpg')
+            pathOut_img_gt_text = str(pathOut_all / 'images_text_and_gt' / f'{tableName}.png')
             img_annot = img_cv.copy()
             row_annot = []
             col_annot = []
@@ -791,24 +798,28 @@ def processPdf(pdfName):
             img_annot = np.concatenate([img_annot, col_annot], axis=0)
 
             # Save | Visual | Image with ground truth and text feature | Add ground truth
-            indicator_gt_row = convert_01_array_to_visual(gt['row'], width=img_annot.shape[1])
-            img_rowgt = np.zeros((*img_annot.shape, 3))
-            img_rowgt[:indicator_gt_row.shape[0], :indicator_gt_row.shape[1], 2] = indicator_gt_row
+            img_gt_row = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
+            indicator_gt_row = convert_01_array_to_visual(1-gt['row'], width=img_annot.shape[1])
+            img_gt_row[:indicator_gt_row.shape[0], :indicator_gt_row.shape[1]] = indicator_gt_row
+            img_gt_row = cv.cvtColor(img_gt_row, code=cv.COLOR_GRAY2RGB)
+            img_gt_row[:, :, 0] = 255
+            img_gt_row = Image.fromarray(img_gt_row).convert('RGBA')
+            img_gt_row.putalpha(int(0.1*255))
 
-            alpha = 0.6
-            test = cv.addWeighted(img_annot, alpha, img_rowgt, 1-alpha, 0)
+            img_gt_col = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
+            indicator_gt_col = convert_01_array_to_visual(1-gt['col'], width=img_annot.shape[0]).T
+            img_gt_col[:indicator_gt_col.shape[0], :indicator_gt_col.shape[1]] = indicator_gt_col
+            img_gt_col = cv.cvtColor(img_gt_col, code=cv.COLOR_GRAY2RGB)
+            img_gt_col[:, :, 1] = 255
+            img_gt_col = Image.fromarray(img_gt_col).convert('RGBA')
+            img_gt_col.putalpha(int(0.3*255))
 
 
-            img_annot_rowgt.rectangle(xy=annotation['xy'], fill=label_color_transparent, outline=label_color_outline, width=annotation['width'])
+            img_annot_color = Image.fromarray(cv.cvtColor(img_annot, code=cv.COLOR_GRAY2RGB)).convert('RGBA')
+            img_gt = Image.alpha_composite(img_gt_col, img_gt_row)
+            img_complete = Image.alpha_composite(img_annot_color, img_gt).convert('RGB')
 
-
-            
-            row_annot.append(indicator_gt_row)
-
-            indicator_gt_col = convert_01_array_to_visual(gt['col'])
-            col_annot.append(indicator_gt_col)
-            cv.imwrite(filename=pathOut_img_gt_text, img=img_annot)
-            
+            img_complete.save(pathOut_img_gt_text, format='png')
 
             # Save | Features
             pathOut_features = pathOut_all / 'features' / f'{tableName}.json'
@@ -822,6 +833,9 @@ def processPdf(pdfName):
     
     return (tables, errors)
 
+with open(pathOut_all / 'images_text_and_gt' / 'legend.json', 'w') as f:
+    json.dump({'horizontal': ['img', 'within text rectangle', 'between textlines like rowstart', 'words crossed (rel to max)'],
+               'vertical': ['img', 'within text rectangle', 'nearest right text is startlike', 'words crossed (rel to max)']}, f, indent=2)
 if PARALLEL:
     results = Parallel(n_jobs=-1, backend='loky', verbose=9)(delayed(processPdf)(pdfName) for pdfName in tabledetect_labelFiles_byPdf)
     tables, errors = zip(*results)
