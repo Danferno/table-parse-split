@@ -4,3 +4,5 @@ lxml
 pytesseract
 prettytable
 torchviz
+
+image_similarity_measures[speedups]

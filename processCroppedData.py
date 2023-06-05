@@ -5,7 +5,7 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 import shutil
 from collections import defaultdict
-import fitz
+import fitz     # type: ignore
 import pandas as pd; pd.set_option("mode.copy_on_write", True)
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -17,6 +17,9 @@ import pickle
 import pytesseract
 import easyocr
 from collections import namedtuple
+from torch.cuda import OutOfMemoryError
+from image_similarity_measures.quality_metrics import ssim
+from glob import glob
 
 np.seterr(all='raise')
 
@@ -28,6 +31,9 @@ SEPARATOR_TYPE = 'narrow'
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
 PATH_DATA_TABLEDETECT = Path(r"F:\ml-parsing-project\data")
 PATH_DATA_PDFS = Path(r"F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted")
+PATH_ANNOTATOR_IMAGES = Path(r"F:\ml-parsing-project\data\parse_activelearning1_jpg\selected")
+PATH_ANNOTATOR_SKEWDATA = Path(r"F:\ml-parsing-project\data\parse_activelearning1_jpg\skewData")
+
 DPI_PYMUPDF = 72
 DPI_TARGET = 150
 DPI_OCR = 300
@@ -245,6 +251,10 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
     pdfPath = pathPdfs_local / pdfName
     doc:fitz.Document = fitz.open(pdfPath)
 
+    # Skew data
+    stub = str(PATH_ANNOTATOR_SKEWDATA / os.path.splitext(pdfName)[0]) + '*'
+    skewFiles = glob(stub)
+
     # Get words from appropriate pages
     for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL):
         # Get words from page | Load page
@@ -264,11 +274,23 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
         img = np.frombuffer(page_image.samples, dtype=np.uint8).reshape(page_image.height, page_image.width, page_image.n)
         _, img_array = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
         img = Image.fromarray(img_array)
-        img_blackIs1 = np.where(img_array == 0, 1, 0)
 
         if len(words) == 0:
             # Get words from page | OCR if necessary
             textDfs = []
+
+            # Rotate if annotators saw rotated page
+            page_skewFiles = [skewFile for skewFile in skewFiles if pageName in skewFile]
+            if page_skewFiles:
+                angles = []
+                for skewFile in page_skewFiles:
+                    with open(skewFile, 'r') as f:
+                        angles.append(float(f.readline().strip('\n')))
+                
+                angles, counts = np.unique(angles, return_counts=True)
+                angle_mode = angles[np.argmax(counts)]
+                img = img.rotate(angle_mode, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
+                img_array = np.array(img)
 
             # Get words from page | OCR | From Image | PyTesseract Fast
             pathSaved = pathOcr / f'{pageName}_tesseractFast.pq'
@@ -299,7 +321,22 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             # Get words from page | OCR | From Image | EasyOCR
             pathSaved = pathOcr / f'{pageName}_easyocr.pkl'
             if not os.path.exists(pathSaved):
-                text = reader.readtext(image=img_array, batch_size=50, detail=1)
+                try:
+                    text = reader.readtext(image=img_array, batch_size=60, detail=1)
+                except OutOfMemoryError:        # type: ignore
+                    page_image_d4 = page.get_pixmap(dpi=int(DPI_OCR/4), alpha=False, colorspace=fitz.csGRAY)
+                    img_d4 = np.frombuffer(page_image_d4.samples, dtype=np.uint8).reshape(page_image_d4.height, page_image_d4.width, page_image_d4.n)
+                    _, img_array_d4 = cv.threshold(np.array(img_d4), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+                    text_d4 = reader.readtext(image=img_array_d4, batch_size=60, detail=1)
+                    
+                    text = []
+                    for d4 in text_d4:      # d4 = text_d4[0]
+                        bbox = d4[0]
+                        bbox = [[x*4 for x in L] for L in bbox]
+                        d1 = (bbox, *d4[1:])
+                        text.append(d1)
+
+
                 with open(pathSaved, 'wb') as file:
                     pickle.dump(text, file)
             else:
@@ -334,6 +371,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             textDf = textDf.reindex(columns=['top', 'left', 'bottom', 'right', 'text', 'conf', 'ocrLabel'])
 
             # Crop bboxes
+            img_blackIs1 = np.where(np.array(img) == 0, 1, 0)
             textDf['toKeep'] = True
             textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
             textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
@@ -366,6 +404,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             textDf[['left', 'right', 'top', 'bottom']] = (textDf[['left', 'right', 'top', 'bottom']] * (DPI_OCR / DPI_PYMUPDF)).round(0).astype(int)
 
             # Crop bboxes
+            img_blackIs1 = np.where(np.array(img) == 0, 1, 0)
             textDf['toKeep'] = True
             textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
             textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
@@ -377,8 +416,6 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
         textDf.to_parquet(outPath)
 
         # Visualise words
-        page_image = page.get_pixmap(dpi=DPI_OCR, alpha=False, colorspace=fitz.csGRAY)
-        img = Image.frombytes(mode='L', size=(page_image.width, page_image.height), data=page_image.samples)
         img_overlay = Image.new('RGBA', img.size, (0,0,0,0))
         img_annot = ImageDraw.Draw(img_overlay, mode='RGBA')
         colors = {
@@ -407,7 +444,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
 
 
 if PARALLEL:
-    results = Parallel(n_jobs=6, backend='loky', verbose=9)(delayed(pdf_to_words)(labelFiles_byPdf_dict) for labelFiles_byPdf_dict in tabledetect_labelFiles_byPdf.items())
+    results = Parallel(n_jobs=5, backend='loky', verbose=9)(delayed(pdf_to_words)(labelFiles_byPdf_dict) for labelFiles_byPdf_dict in tabledetect_labelFiles_byPdf.items())
 else:
     reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
     for labelFiles_byPdf_dict in tqdm(tabledetect_labelFiles_byPdf.items(), desc='Gathering words'):
@@ -543,7 +580,7 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
             raise Exception('Not all lines contain separators')
 
     # Features | Text | Text like rowstart | Merge textline-level text_like_start_row info
-    textDf_row = textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row']], left_on='lineno_seq', right_on='lineno_seq', how='outer').fillna({'F1_text_like_start_row': 1})
+    textDf_row = textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row']], left_on='lineno_seq', right_on='lineno_seq', how='outer').fillna({'F1_text_like_start_row': 1}).astype({'F1_text_like_start_row':int}).dropna(axis='index', subset='between_textlines')
     textDf_row['between_textlines_like_rowstart'] = textDf_row['between_textlines'] & textDf_row['F1_text_like_start_row']
 
     # Features | Text | Text like rowstart | Add to features
@@ -599,14 +636,19 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     features['col_wordsCrossed_relToMax'] = features['col_wordsCrossed_count'] / features['col_wordsCrossed_count'].max() if features['col_wordsCrossed_count'].max() != 0 else features['col_wordsCrossed_count']
 
     # Features | Text | Outside text rectangle
-    textRectangle = {}
-    textRectangle['left'] = textDf['left'].min()
-    textRectangle['top'] = textDf['top'].min()
-    textRectangle['right'] = textDf['right'].max()
-    textRectangle['bottom'] = textDf['bottom'].max()
+    if len(textDf):
+        textRectangle = {}
+        textRectangle['left'] = textDf['left'].min()
+        textRectangle['top'] = textDf['top'].min()
+        textRectangle['right'] = textDf['right'].max()
+        textRectangle['bottom'] = textDf['bottom'].max()
 
-    row_in_textrectangle = np.zeros(shape=img01.shape[0], dtype=np.uint8); row_in_textrectangle[textRectangle['top']:textRectangle['bottom']+1] = 1
-    col_in_textrectangle = np.zeros(shape=img01.shape[1], dtype=np.uint8); col_in_textrectangle[textRectangle['left']:textRectangle['right']+1] = 1
+        row_in_textrectangle = np.zeros(shape=img01.shape[0], dtype=np.uint8); row_in_textrectangle[textRectangle['top']:textRectangle['bottom']+1] = 1
+        col_in_textrectangle = np.zeros(shape=img01.shape[1], dtype=np.uint8); col_in_textrectangle[textRectangle['left']:textRectangle['right']+1] = 1
+    
+    else:
+        row_in_textrectangle = np.ones(shape=img01.shape[0], dtype=np.uint8)
+        col_in_textrectangle = np.ones(shape=img01.shape[1], dtype=np.uint8);
 
     features['row_in_textrectangle'] = row_in_textrectangle
     features['col_in_textrectangle'] = col_in_textrectangle
@@ -691,6 +733,27 @@ def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]),
     gt['col'] = gt_col
     return gt
 
+def img_from_tablebox():
+    ...
+    
+def calculate_image_similarity(img1, img2):
+    img1_array = np.array(img1)
+    img2_array = np.array(img2)
+
+    min_dim0 = min(img1_array.shape[0], img2_array.shape[0])
+    min_dim1 = min(img1_array.shape[1], img2_array.shape[1])
+
+    maxDiscrepancy = max([img1_array.shape[0]-min_dim0, img2_array.shape[0]-min_dim0, img1_array.shape[1]-min_dim1, img2_array.shape[1]-min_dim1])
+
+    if maxDiscrepancy > 20:
+        return 0
+
+    img1_array = np.expand_dims(img1_array[:min_dim0, :min_dim1], 2)
+    img2_array = np.expand_dims(img2_array[:min_dim0, :min_dim1], 2)
+
+    return ssim(img1_array, img2_array)
+
+
 def processPdf(pdfName):
     # Open pdf
     pdfPath = pathPdfs_local / pdfName
@@ -713,7 +776,7 @@ def processPdf(pdfName):
         textDf_page = pd.read_parquet(pathWordsFile).drop_duplicates()
         textDf_page[['left', 'right', 'top', 'bottom']] = textDf_page[['left', 'right', 'top', 'bottom']] * (DPI_PYMUPDF / DPI_OCR)
 
-        # Loop over tables
+        # Loop over tables (TD: add rotation)
         for tableIteration, _ in enumerate(fitzBoxes):
             tables += 1
             tableName = os.path.splitext(pdfName)[0] + f'-p{pageNumber+1}_t{tableIteration}'
@@ -727,7 +790,39 @@ def processPdf(pdfName):
             img_tight = page.get_pixmap(dpi=DPI_TARGET, clip=tableRect, alpha=False, colorspace=fitz.csGRAY)
             img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
             img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
-            img.paste(img_tight, (PADDING, PADDING))       
+            img.paste(img_tight, (PADDING, PADDING))
+
+            # Ensure nothing went wrong in table numbering (not always consistent)
+            img_sent_to_annotator = Image.open(PATH_ANNOTATOR_IMAGES / f'{tableName}.jpg').convert(mode='L')
+            similarity_index = calculate_image_similarity(img1=img, img2=img_sent_to_annotator)
+            if similarity_index < 0.85:
+                # Retry with other tables
+                similarity_indices = {}
+                for tableIteration, _ in enumerate(fitzBoxes):      # tableIteration = next(enumerate(fitzBoxes))[0]
+                    tableRect_temp = fitz.Rect(fitzBoxes[tableIteration]['xy'])
+                    img_tight_temp = page.get_pixmap(dpi=DPI_TARGET, clip=tableRect_temp, alpha=False, colorspace=fitz.csGRAY)
+                    img_tight_temp = Image.frombytes(mode='L', size=(img_tight_temp.width, img_tight_temp.height), data=img_tight_temp.samples)
+                    img_temp = Image.new(img_tight_temp.mode, (img_tight_temp.width+PADDING*2, img_tight_temp.height+PADDING*2), 255)
+                    img_temp.paste(img_tight_temp, (PADDING, PADDING))
+                    similarity_index = calculate_image_similarity(img1=img_temp, img2=img_sent_to_annotator)
+                    similarity_indices[tableIteration] = similarity_index
+
+                most_similar_tableIteration = max(similarity_indices, key=similarity_indices.get)
+                if max(similarity_indices.values()) < 0.85:
+                    raise Exception('Images not similar')
+
+                tableName = os.path.splitext(pdfName)[0] + f'-p{pageNumber+1}_t{most_similar_tableIteration}'
+                pathImg = PATH_DATA_TABLEDETECT / 'parse_activelearning1_jpg' / 'selected' / f"{tableName}.jpg"
+                pathLabel = pathLabels_tablesplit / f"{tableName}.xml"
+                if (not os.path.exists(pathImg)) or (not os.path.exists(pathLabel)):
+                    errors += 1
+                    continue
+
+                tableRect = fitz.Rect(fitzBoxes[most_similar_tableIteration]['xy'])
+                img_tight = page.get_pixmap(dpi=DPI_TARGET, clip=tableRect, alpha=False, colorspace=fitz.csGRAY)
+                img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
+                img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
+                img.paste(img_tight, (PADDING, PADDING))             
 
             # Process text
             # Process text | Reduce to table bbox
