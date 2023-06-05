@@ -229,6 +229,20 @@ def harmonise_bbox_height(textDf):
 
     return textDf
 
+def deskew_img_from_file(pageName, img, skewFiles):
+    page_skewFiles = [skewFile for skewFile in skewFiles if pageName in skewFile]
+    if page_skewFiles:
+        angles = []
+        for skewFile in page_skewFiles:
+            with open(skewFile, 'r') as f:
+                angles.append(float(f.readline().strip('\n')))
+        
+        angles, counts = np.unique(angles, return_counts=True)
+        angle_mode = angles[np.argmax(counts)]
+        img = img.rotate(angle_mode, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
+
+    return img
+
 BoxIntersect = namedtuple('BoxIntersect', field_names=['left', 'right', 'top', 'bottom', 'intersect', 'Index'])
 def boxes_intersect(box, box_target):
     overlap_x = ((box.left >= box_target.left) & (box.left < box_target.right)) | ((box.right >= box_target.left) & (box.left < box_target.left))
@@ -280,17 +294,8 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
             textDfs = []
 
             # Rotate if annotators saw rotated page
-            page_skewFiles = [skewFile for skewFile in skewFiles if pageName in skewFile]
-            if page_skewFiles:
-                angles = []
-                for skewFile in page_skewFiles:
-                    with open(skewFile, 'r') as f:
-                        angles.append(float(f.readline().strip('\n')))
-                
-                angles, counts = np.unique(angles, return_counts=True)
-                angle_mode = angles[np.argmax(counts)]
-                img = img.rotate(angle_mode, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
-                img_array = np.array(img)
+            img = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)
+            img_array = np.array(img)
 
             # Get words from page | OCR | From Image | PyTesseract Fast
             pathSaved = pathOcr / f'{pageName}_tesseractFast.pq'
@@ -760,12 +765,17 @@ def processPdf(pdfName):
     doc:fitz.Document = fitz.open(pdfPath)
     tables, errors = 0, 0
 
+    # Skew data
+    stub = str(PATH_ANNOTATOR_SKEWDATA / os.path.splitext(pdfName)[0]) + '*'
+    skewFiles = glob(stub)
+
     # Get pagenumbers of tables
     pageNumbers = [int(labelName.split('-p')[1].split('.')[0].replace('p', ''))-1 for labelName in tabledetect_labelFiles_byPdf[pdfName]]
     
     # Get tables on page
     for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL):
         pageNumber = pageNumbers[pageIteration]
+        pageName = f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}'
         page:fitz.Page = doc.load_page(page_id=pageNumber)
         
         yoloPath = pathLabels_tabledetect_local / tabledetect_labelFiles_byPdf[pdfName][pageIteration]
@@ -791,6 +801,7 @@ def processPdf(pdfName):
             img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
             img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
             img.paste(img_tight, (PADDING, PADDING))
+            img = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
 
             # Ensure nothing went wrong in table numbering (not always consistent)
             img_sent_to_annotator = Image.open(PATH_ANNOTATOR_IMAGES / f'{tableName}.jpg').convert(mode='L')
@@ -804,12 +815,14 @@ def processPdf(pdfName):
                     img_tight_temp = Image.frombytes(mode='L', size=(img_tight_temp.width, img_tight_temp.height), data=img_tight_temp.samples)
                     img_temp = Image.new(img_tight_temp.mode, (img_tight_temp.width+PADDING*2, img_tight_temp.height+PADDING*2), 255)
                     img_temp.paste(img_tight_temp, (PADDING, PADDING))
+                    img_temp = deskew_img_from_file(pageName=pageName, img=img_temp, skewFiles=skewFiles)            
                     similarity_index = calculate_image_similarity(img1=img_temp, img2=img_sent_to_annotator)
                     similarity_indices[tableIteration] = similarity_index
 
                 most_similar_tableIteration = max(similarity_indices, key=similarity_indices.get)
                 if max(similarity_indices.values()) < 0.85:
-                    raise Exception('Images not similar')
+                    errors += 1
+                    continue
 
                 tableName = os.path.splitext(pdfName)[0] + f'-p{pageNumber+1}_t{most_similar_tableIteration}'
                 pathImg = PATH_DATA_TABLEDETECT / 'parse_activelearning1_jpg' / 'selected' / f"{tableName}.jpg"
@@ -823,6 +836,7 @@ def processPdf(pdfName):
                 img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
                 img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
                 img.paste(img_tight, (PADDING, PADDING))             
+                img = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
 
             # Process text
             # Process text | Reduce to table bbox
