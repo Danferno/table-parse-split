@@ -18,7 +18,7 @@ import pytesseract
 import easyocr
 from collections import namedtuple
 from torch.cuda import OutOfMemoryError
-from image_similarity_measures.quality_metrics import ssim
+import imagehash
 from glob import glob
 
 np.seterr(all='raise')
@@ -693,11 +693,16 @@ def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]),
     if adjust_labels_to_textboxes:
         # Row
         textline_boundaries_horizontal = np.diff(row_between_textlines.astype(np.int8), append=0)
+        if textline_boundaries_horizontal.max() < 1:
+            textline_boundaries_horizontal[-1] = 0
         textline_boundaries_horizontal = np.column_stack([np.where(textline_boundaries_horizontal == 1)[0], np.where(textline_boundaries_horizontal == -1)[0]])
 
         # Column
         textline_boundaries_vertical = np.diff((col_wordsCrossed_relToMax < 0.001).astype(np.int8), append=0)
-        textline_boundaries_vertical[0] = 1
+        if textline_boundaries_vertical.max() < 1:
+            textline_boundaries_vertical[-1] = 0
+        else:
+            textline_boundaries_vertical[0] = 1
         textline_boundaries_vertical = np.column_stack([np.where(textline_boundaries_vertical == 1)[0], np.where(textline_boundaries_vertical == -1)[0]])
     
     # Parse xml
@@ -712,12 +717,12 @@ def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]),
         row_separators = [(int(row.find('.//ymin').text), int(row.find('.//ymax').text)) for row in rows]
         row_separators = sorted(row_separators, key= lambda x: x[0])
 
-        if adjust_labels_to_textboxes:
+        if (adjust_labels_to_textboxes) and (len(textline_boundaries_horizontal) > 0):
             row_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=row_separators, arrayBetter=textline_boundaries_horizontal)
 
         col_separators = [(int(col.find('.//xmin').text), int(col.find('.//xmax').text)) for col in cols]
         col_separators = sorted(col_separators, key= lambda x: x[0])
-        if adjust_labels_to_textboxes:
+        if (adjust_labels_to_textboxes) and (len(textline_boundaries_vertical) > 0):
             col_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=col_separators, arrayBetter=textline_boundaries_vertical)
 
         # Create ground truth arrays
@@ -742,21 +747,21 @@ def img_from_tablebox():
     ...
     
 def calculate_image_similarity(img1, img2):
-    img1_array = np.array(img1)
-    img2_array = np.array(img2)
+    min_dim0 = min(img1.height, img2.height)
+    min_dim1 = min(img1.width, img2.width)
 
-    min_dim0 = min(img1_array.shape[0], img2_array.shape[0])
-    min_dim1 = min(img1_array.shape[1], img2_array.shape[1])
-
-    maxDiscrepancy = max([img1_array.shape[0]-min_dim0, img2_array.shape[0]-min_dim0, img1_array.shape[1]-min_dim1, img2_array.shape[1]-min_dim1])
+    maxDiscrepancy = max([img1.height-min_dim0, img2.height-min_dim0, img1.width-min_dim1, img2.width-min_dim1])
 
     if maxDiscrepancy > 20:
         return 0
 
-    img1_array = np.expand_dims(img1_array[:min_dim0, :min_dim1], 2)
-    img2_array = np.expand_dims(img2_array[:min_dim0, :min_dim1], 2)
+    hash1 = imagehash.average_hash(img1)
+    hash2 = imagehash.average_hash(img2)
 
-    return ssim(img1_array, img2_array)
+    distance = hash1 - hash2
+    score = 1 - (distance / len(hash1))
+
+    return score
 
 
 def processPdf(pdfName):
@@ -773,7 +778,7 @@ def processPdf(pdfName):
     pageNumbers = [int(labelName.split('-p')[1].split('.')[0].replace('p', ''))-1 for labelName in tabledetect_labelFiles_byPdf[pdfName]]
     
     # Get tables on page
-    for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL):
+    for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL):     # pageIteration = -1
         pageNumber = pageNumbers[pageIteration]
         pageName = f'{os.path.splitext(pdfName)[0]}-p{pageNumber+1}'
         page:fitz.Page = doc.load_page(page_id=pageNumber)
@@ -786,13 +791,13 @@ def processPdf(pdfName):
         textDf_page = pd.read_parquet(pathWordsFile).drop_duplicates()
         textDf_page[['left', 'right', 'top', 'bottom']] = textDf_page[['left', 'right', 'top', 'bottom']] * (DPI_PYMUPDF / DPI_OCR)
 
-        # Loop over tables (TD: add rotation)
-        for tableIteration, _ in enumerate(fitzBoxes):
+        # Loop over tables
+        for tableIteration, _ in enumerate(fitzBoxes):      # tableIteration = 2
             tables += 1
             tableName = os.path.splitext(pdfName)[0] + f'-p{pageNumber+1}_t{tableIteration}'
-            pathImg = PATH_DATA_TABLEDETECT / 'parse_activelearning1_jpg' / 'selected' / f"{tableName}.jpg"
+            pathImg_annotator = PATH_DATA_TABLEDETECT / 'parse_activelearning1_jpg' / 'selected' / f"{tableName}.jpg"
             pathLabel = pathLabels_tablesplit / f"{tableName}.xml"
-            if (not os.path.exists(pathImg)) or (not os.path.exists(pathLabel)):
+            if (not os.path.exists(pathImg_annotator)) or (not os.path.exists(pathLabel)):
                 errors += 1
                 continue
 
@@ -806,6 +811,7 @@ def processPdf(pdfName):
             # Ensure nothing went wrong in table numbering (not always consistent)
             img_sent_to_annotator = Image.open(PATH_ANNOTATOR_IMAGES / f'{tableName}.jpg').convert(mode='L')
             similarity_index = calculate_image_similarity(img1=img, img2=img_sent_to_annotator)
+            skip_table = False
             if similarity_index < 0.85:
                 # Retry with other tables
                 similarity_indices = {}
@@ -822,15 +828,9 @@ def processPdf(pdfName):
                 most_similar_tableIteration = max(similarity_indices, key=similarity_indices.get)
                 if max(similarity_indices.values()) < 0.85:
                     errors += 1
-                    continue
+                    skip_table = True
 
-                tableName = os.path.splitext(pdfName)[0] + f'-p{pageNumber+1}_t{most_similar_tableIteration}'
-                pathImg = PATH_DATA_TABLEDETECT / 'parse_activelearning1_jpg' / 'selected' / f"{tableName}.jpg"
-                pathLabel = pathLabels_tablesplit / f"{tableName}.xml"
-                if (not os.path.exists(pathImg)) or (not os.path.exists(pathLabel)):
-                    errors += 1
-                    continue
-
+                # Adapt image to most similar (note, do not update tablename!)
                 tableRect = fitz.Rect(fitzBoxes[most_similar_tableIteration]['xy'])
                 img_tight = page.get_pixmap(dpi=DPI_TARGET, clip=tableRect, alpha=False, colorspace=fitz.csGRAY)
                 img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
@@ -838,6 +838,8 @@ def processPdf(pdfName):
                 img.paste(img_tight, (PADDING, PADDING))             
                 img = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
 
+            if skip_table:
+                continue
             # Process text
             # Process text | Reduce to table bbox
             textDf_table = textDf_page.loc[(textDf_page['top'] >= tableRect.y0) & (textDf_page['left'] >= tableRect.x0) & (textDf_page['bottom'] <= tableRect.y1) & (textDf_page['right'] <= tableRect.x1)]        # clip to table
