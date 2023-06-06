@@ -16,6 +16,9 @@ def run():
     import numpy as np
     from collections import namedtuple, OrderedDict
     from torch.utils.tensorboard import SummaryWriter
+    from datetime import datetime
+    from time import perf_counter
+    from functools import cache
 
     # Constants
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -37,7 +40,7 @@ def run():
     COMMON_GLOBAL_VARIABLES = ['global_{}Avg_p0', 'global_{}Avg_p5', 'global_{}Avg_p10']
 
     # Model parameters
-    EPOCHS = 100
+    EPOCHS = 2
     MAX_LR = 0.1
     HIDDEN_SIZES = [40, 10]
     CONV_LETTER_KERNEL = [4, 4]
@@ -45,10 +48,6 @@ def run():
 
     CONV_FINAL_CHANNELS = CONV_LETTER_CHANNELS
     CONV_FINAL_AVG_COUNT = 4
-
-    CONV_SEQUENCE_KERNEL = [60, 30]
-    CONV_SEQUENCE_CHANNELS = 2
-    CONV_PREDS_CHANNELS = 2
 
     LAG_LEAD_STRUCTURE = [-4, -2, -1, 1, 2, 4]
 
@@ -58,6 +57,7 @@ def run():
     # Derived constants
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOSS_TYPES_COUNT = len(LOSS_TYPES)
+    RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
 
     # Paths
     def replaceDirs(path):
@@ -68,9 +68,16 @@ def run():
             os.makedirs(path)
     pathData = PATH_ROOT / 'data' / f'{DATA_TYPE}_{SUFFIX}'
     pathLogs = PATH_ROOT / 'torchlogs'
-    replaceDirs(pathData / 'val_annotated')
+    pathModels = PATH_ROOT / 'models'
+    replaceDirs(pathData / 'val_annotated')  
+    pathModel = pathModels / RUN_NAME
+    os.makedirs(pathModel, exist_ok=True)
+
+    # Timing
+    timers = {}
 
     # Data
+    start_data = perf_counter()
     Sample = namedtuple('sample', ['features', 'targets', 'meta'])
     Meta = namedtuple('meta', ['path_image'])
     Targets = namedtuple('target', LOSS_TYPES)
@@ -111,6 +118,7 @@ def run():
 
         def __len__(self):
             return len(self.items)  
+        
         def __getitem__(self, idx):     # idx = 0
             # Generate paths for a specific item
             pathImage = str(self.dir_images / f'{self.items[idx]}{self.image_format}')
@@ -159,7 +167,7 @@ def run():
             return sample
 
     dataset_train = TableDataset(dir_data=pathData / 'train')
-    dataloader_train = DataLoader(dataset=dataset_train, batch_size=BATCH_SIZE, shuffle=True)
+    dataloader_train = DataLoader(dataset=dataset_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
 
     dataset_val = TableDataset(dir_data=pathData / 'val')
     dataloader_val = DataLoader(dataset=dataset_val, batch_size=BATCH_SIZE, shuffle=False)
@@ -167,7 +175,11 @@ def run():
     dataset_test = TableDataset(dir_data=pathData / 'test')
     dataloader_test = DataLoader(dataset=dataset_val, batch_size=BATCH_SIZE, shuffle=False)
 
+    timers['data'] = perf_counter() - start_data
+    
+
     # Model
+    start_model_definition = perf_counter()
     Output = namedtuple('output', LOSS_TYPES)
     class TabliterModel(nn.Module):
         def __init__(self, hidden_sizes=[15,10], layer_depth=3):
@@ -296,6 +308,7 @@ def run():
         else:
             return loss.sum()
 
+    timers['model_definition'] = perf_counter() - start_model_definition
 
     # Train
     lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
@@ -348,7 +361,7 @@ def run():
             Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
             Avg val loss: {val_loss.sum().item():>6f} (total) | {val_loss[0].item():>6f} (row) | {val_loss[1].item():>6f} (col)''')
         
-        return val_loss
+        return val_loss.sum()
 
     # Describe model
     # Model description | Graph
@@ -372,20 +385,33 @@ def run():
     count_parameters(model=model)
 
     # Model description | Tensorboard
-    writer = SummaryWriter("torchlogs/")
+    writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
     writer.add_graph(model, input_to_model=[sample.features])
     
-    for epoch in range(EPOCHS):
-        learning_rate = scheduler.get_last_lr()[0]
-        print(f"\nEpoch {epoch+1} of {EPOCHS}. Learning rate: {learning_rate:03f}")
-        train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
-        val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
+    start_train = perf_counter()
+    with torch.autograd.profiler.profile(enabled=False) as prof:
+        best_val_loss = 9e20
+        for epoch in range(EPOCHS):
+            learning_rate = scheduler.get_last_lr()[0]
+            print(f"\nEpoch {epoch+1} of {EPOCHS}. Learning rate: {learning_rate:03f}")
+            train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
+            val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
 
-        writer.add_scalar('Train loss', scalar_value=train_loss, global_step=epoch)
-        writer.add_scalar('Val loss', scalar_value=val_loss.sum(), global_step=epoch)
-        writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
+            writer.add_scalar('Train loss', scalar_value=train_loss, global_step=epoch)
+            writer.add_scalar('Val loss', scalar_value=val_loss, global_step=epoch)
+            writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(model.state_dict(), pathModel / 'best.pt')
+
+        torch.save(model.state_dict(), pathModel / f'last.pt')
+
+    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+    timers['train'] = perf_counter() - start_train
 
     # Predict
+    start_eval = perf_counter()
     def eval_loop(dataloader, model, lossFunctions, outPath=None):
         batchCount = len(dataloader)
         eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
@@ -438,13 +464,18 @@ def run():
 
     # Visualize results
     eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
-    
+    timers['eval'] = perf_counter() - start_eval
+
     # Close tensorboard writer
     writer.add_hparams(hparam_dict={'epochs': EPOCHS,
                                     'batch_size': BATCH_SIZE,
                                     'max_lr': MAX_LR},
                        metric_dict={'val_loss': val_loss.sum().item()/len(dataloader_val)})
     writer.close()
+
+    # Reporting timings
+    for key, value in timers.items():
+        print(f'{key}: {value}')
 
 if __name__ == '__main__':
     run()

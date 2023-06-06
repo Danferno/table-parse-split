@@ -2,3 +2,4 @@
 /torchlogs
 *.pyc
 *.dta
+*.pt

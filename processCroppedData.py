@@ -41,6 +41,7 @@ PADDING = 40
 LINENO_GAP = 5
 PRECISION = np.float32
 ADJUST_LABELS_TO_TEXTLINES = True
+ADD_EDGE_BORDERS_TO_GT = True
 
 LANGUAGES = 'nld+fra+deu+eng'
 OCR_TYPES = ['tesseract_fitz', 'tesseract_fast', 'tesseract_legacy', 'easyocr']
@@ -688,9 +689,11 @@ def adjust_initialBoundaries_to_betterBoundariesB(arrayInitial, arrayBetter):
     
     return arrayInitial
 
-def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]), col_wordsCrossed_relToMax=np.array([]), adjust_labels_to_textboxes=False):
+def vocLabels_to_groundTruth(pathLabel, img, features, adjust_labels_to_textboxes=False, add_edge_borders=False):
     # Parse textbox-information
     if adjust_labels_to_textboxes:
+        row_between_textlines = features['row_between_textlines']
+        col_wordsCrossed_relToMax = features['col_wordsCrossed_relToMax']
         # Row
         textline_boundaries_horizontal = np.diff(row_between_textlines.astype(np.int8), append=0)
         if textline_boundaries_horizontal.max() < 1:
@@ -703,8 +706,8 @@ def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]),
             textline_boundaries_vertical[-1] = 0
         else:
             textline_boundaries_vertical[0] = 1
-        textline_boundaries_vertical = np.column_stack([np.where(textline_boundaries_vertical == 1)[0], np.where(textline_boundaries_vertical == -1)[0]])
-    
+        textline_boundaries_vertical = np.column_stack([np.where(textline_boundaries_vertical == 1)[0], np.where(textline_boundaries_vertical == -1)[0]])      
+
     # Parse xml
     root = etree.parse(pathLabel)
     objectCount = len(root.findall('.//object'))
@@ -724,6 +727,49 @@ def vocLabels_to_groundTruth(pathLabel, img, row_between_textlines=np.array([]),
         col_separators = sorted(col_separators, key= lambda x: x[0])
         if (adjust_labels_to_textboxes) and (len(textline_boundaries_vertical) > 0):
             col_separators = adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=col_separators, arrayBetter=textline_boundaries_vertical)
+
+        # Optionally add edge borders (top, left, right , bottom)
+        #   Excluding these can confuse the model, as they really look like borders
+        if add_edge_borders:
+            # Row
+            if len(row_separators) > 0:
+                first_nonwhite = np.where(features['row_avg'] < 1)[0][0]
+                try:
+                    first_withtext = np.where(features['row_wordsCrossed_count'] > 0)[0][0]
+                except IndexError:
+                    first_withtext = 0
+                if (first_nonwhite < first_withtext) and (first_withtext - first_nonwhite > 2) and (first_withtext < row_separators[0][0]):
+                    top_separator = (first_nonwhite, first_withtext-1)
+                    row_separators.insert(0, top_separator)
+
+                last_nonwhite = np.where(features['row_avg'] < 1)[0][-1]
+                try:
+                    last_withtext = np.where(features['row_wordsCrossed_count'] > 0)[0][-1]
+                except IndexError:
+                    last_withtext = features['row_wordsCrossed_count'].size
+                if (last_nonwhite > last_withtext) and (last_nonwhite - last_withtext > 2) and (last_withtext > row_separators[-1][0]):
+                    bot_separator = (last_withtext+1, last_nonwhite)
+                    row_separators.append(bot_separator)
+
+            # Column
+            if len(col_separators) > 0:
+                first_nonwhite = np.where(features['col_avg'] < 1)[0][0]
+                try:
+                    first_withtext = np.where(features['col_wordsCrossed_count'] > 0)[0][0]
+                except:
+                    first_withtext = 0
+                if (first_nonwhite < first_withtext) and (first_withtext - first_nonwhite > 2) and (first_withtext < col_separators[0][0]):
+                    left_separator = (first_nonwhite, first_withtext-1)
+                    col_separators.insert(0, left_separator)
+
+                last_nonwhite = np.where(features['col_avg'] < 1)[0][-1]
+                try:
+                    last_withtext = np.where(features['col_wordsCrossed_count'] > 0)[0][-1]
+                except:
+                    last_withtext = features['col_wordsCrossed_count'].size
+                if (last_nonwhite > last_withtext) and (last_nonwhite - last_withtext > 2) and (last_withtext > col_separators[-1][0]):
+                    right_separator = (last_withtext+1, last_nonwhite)
+                    col_separators.append(right_separator)
 
         # Create ground truth arrays
         gt_row = np.zeros(shape=img.shape[0], dtype=np.uint8)
@@ -765,6 +811,8 @@ def calculate_image_similarity(img1, img2):
 
 
 def processPdf(pdfName):
+    pd.set_option("mode.copy_on_write", True)
+
     # Open pdf
     pdfPath = pathPdfs_local / pdfName
     doc:fitz.Document = fitz.open(pdfPath)
@@ -856,7 +904,7 @@ def processPdf(pdfName):
             img01, img_cv, features = imgAndWords_to_features(img=img, textDf_table=textDf_table)
 
             # Extract ground truths     # adjust to word positions
-            gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01, row_between_textlines=features['row_between_textlines'], col_wordsCrossed_relToMax=features['col_wordsCrossed_relToMax'], adjust_labels_to_textboxes=ADJUST_LABELS_TO_TEXTLINES)
+            gt = vocLabels_to_groundTruth(pathLabel=pathLabel, img=img01, features=features, adjust_labels_to_textboxes=ADJUST_LABELS_TO_TEXTLINES, add_edge_borders=ADD_EDGE_BORDERS_TO_GT)
 
             # Save
             # Save | Visual
