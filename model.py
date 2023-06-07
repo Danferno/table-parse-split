@@ -19,13 +19,17 @@ def run():
     from datetime import datetime
     from time import perf_counter
     from functools import cache
-    from PIL import Image
+    from PIL import Image, ImageDraw
+    import pandas as pd
+    import easyocr
     
     # Constants
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
     SUFFIX = 'narrow'
     DATA_TYPE = 'real'
     PROFILE = False
+    TASKS = {'train': False, 'eval': False, 'postprocess':True}
+    BEST_RUN = '2023_06_07__13_12'
 
     LOSS_TYPES = ['row', 'col']
     FEATURE_TYPES = LOSS_TYPES + ['image']
@@ -38,6 +42,11 @@ def run():
 
     LUMINOSITY_GT_FEATURES_MAX = 240
     LUMINOSITY_FILLER = 255
+
+    PADDING = 40
+    TRUTH_THRESHOLD = 0.6
+    COLOR_CELL = (102, 153, 255, int(0.1*255))      # light blue
+    COLOR_OUTLINE = (255, 255, 255, int(0.9*255))
 
     # Model parameters
     EPOCHS = 100
@@ -73,9 +82,6 @@ def run():
     pathData = PATH_ROOT / 'data' / f'{DATA_TYPE}_{SUFFIX}'
     pathLogs = PATH_ROOT / 'torchlogs'
     pathModels = PATH_ROOT / 'models'
-    replaceDirs(pathData / 'val_annotated')  
-    pathModel = pathModels / RUN_NAME
-    os.makedirs(pathModel, exist_ok=True)
 
     # Timing
     timers = {}
@@ -400,175 +406,281 @@ def run():
         
         return val_loss.sum()
 
-    # Describe model
-    # Model description | Graph
-    sample = next(iter(dataloader_train))
-    y = model(sample.features)
-    make_dot(y, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(pathLogs / 'graph', format='png')
+    if TASKS['train']:
+        # Prepare folders
+        replaceDirs(pathData / 'val_annotated')  
+        pathModel = pathModels / RUN_NAME
+        os.makedirs(pathModel, exist_ok=True)
 
-    # Model description | Count parameters
-    def count_parameters(model):
-        table = PrettyTable(["Modules", "Parameters"])
-        total_params = 0
-        for name, parameter in model.named_parameters():
-            if not parameter.requires_grad: continue
-            params = parameter.numel()
-            table.add_row([name, params])
-            total_params+=params
-        print(table)
-        print(f"Total Trainable Params: {total_params}")
-        return total_params
-    print(model)
-    count_parameters(model=model)
+        # Describe model
+        # Model description | Graph
+        sample = next(iter(dataloader_train))
+        y = model(sample.features)
+        make_dot(y, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(pathLogs / 'graph', format='png')
 
-    # Model description | Tensorboard
-    writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
-    writer.add_graph(model, input_to_model=[sample.features])
-    
-    start_train = perf_counter()
-    with torch.autograd.profiler.profile(enabled=PROFILE) as prof:
-        best_val_loss = 9e20
-        for epoch in range(EPOCHS):
-            learning_rate = scheduler.get_last_lr()[0]
-            print(f"\nEpoch {epoch+1} of {EPOCHS}. Learning rate: {learning_rate:03f}")
-            train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
-            val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
+        # Model description | Count parameters
+        def count_parameters(model):
+            table = PrettyTable(["Modules", "Parameters"])
+            total_params = 0
+            for name, parameter in model.named_parameters():
+                if not parameter.requires_grad: continue
+                params = parameter.numel()
+                table.add_row([name, params])
+                total_params+=params
+            print(table)
+            print(f"Total Trainable Params: {total_params}")
+            return total_params
+        print(model)
+        count_parameters(model=model)
 
-            writer.add_scalar('Train loss', scalar_value=train_loss, global_step=epoch)
-            writer.add_scalar('Val loss', scalar_value=val_loss, global_step=epoch)
-            writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
+        # Model description | Tensorboard
+        writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
+        writer.add_graph(model, input_to_model=[sample.features])
+        
+        start_train = perf_counter()
+        with torch.autograd.profiler.profile(enabled=PROFILE) as prof:
+            best_val_loss = 9e20
+            for epoch in range(EPOCHS):
+                learning_rate = scheduler.get_last_lr()[0]
+                print(f"\nEpoch {epoch+1} of {EPOCHS}. Learning rate: {learning_rate:03f}")
+                train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
+                val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(model.state_dict(), pathModel / 'best.pt')
+                writer.add_scalar('Train loss', scalar_value=train_loss, global_step=epoch)
+                writer.add_scalar('Val loss', scalar_value=val_loss, global_step=epoch)
+                writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
 
-        torch.save(model.state_dict(), pathModel / f'last.pt')
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    torch.save(model.state_dict(), pathModel / 'best.pt')
 
-    if PROFILE:
-        print(dataset_train.__getitem__.cache_info())
-        print(prof.key_averages().table(sort_by="self_cpu_time_total"))
-    timers['train'] = perf_counter() - start_train
+            torch.save(model.state_dict(), pathModel / f'last.pt')
 
-    # Predict
-    start_eval = perf_counter()
-    def convert_01_array_to_visual(array, invert=False, width=40) -> np.array:
-        luminosity = (1 - array) * LUMINOSITY_GT_FEATURES_MAX if invert else array * LUMINOSITY_GT_FEATURES_MAX
-        luminosity = luminosity.round(0).astype(np.uint8)
-        luminosity = np.expand_dims(luminosity, axis=1)
-        luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
-        return luminosity
+        if PROFILE:
+            print(dataset_train.__getitem__.cache_info())
+            print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+        timers['train'] = perf_counter() - start_train
 
-    def eval_loop(dataloader, model, lossFunctions, outPath=None):
-        batchCount = len(dataloader)
-        eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
+    if TASKS['eval']:
+        pathModelDict = PATH_ROOT / 'models' / BEST_RUN / 'best.pt'
+        model.load_state_dict(torch.load(pathModelDict))
+        model.eval()
+
+        # Predict
+        start_eval = perf_counter()
+        def convert_01_array_to_visual(array, invert=False, width=40) -> np.array:
+            luminosity = (1 - array) * LUMINOSITY_GT_FEATURES_MAX if invert else array * LUMINOSITY_GT_FEATURES_MAX
+            luminosity = luminosity.round(0).astype(np.uint8)
+            luminosity = np.expand_dims(luminosity, axis=1)
+            luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
+            return luminosity
+
+        def eval_loop(dataloader, model, lossFunctions, outPath=None):
+            batchCount = len(dataloader)
+            eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
+            with torch.no_grad():
+                for batchNumber, batch in enumerate(dataloader):
+                    # Compute prediction and loss
+                    preds = model(batch.features)
+                    eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
+                    eval_loss += eval_loss_batch
+                    correct  += correct_batch
+                    maxCorrect  += maxCorrect_batch
+
+                    # Visualise
+                    if outPath:
+                        batch_size = dataloader.batch_size
+                        for sampleNumber in range(batch_size):      # sampleNumber = 0
+                            # Sample data
+                            # Sample data | Image
+                            pathImage = Path(batch.meta.path_image[sampleNumber])
+                            img_annot = cv.imread(str(pathImage), flags=cv.IMREAD_GRAYSCALE)
+                            img_initial_size = img_annot.shape
+                            
+                            # Sample data | Ground truth
+                            gt = {}
+                            gt['row'] = batch.targets.row[sampleNumber].squeeze().cpu().numpy()
+                            gt['col'] = batch.targets.col[sampleNumber].squeeze().cpu().numpy()
+
+                            predictions = {}
+                            predictions['row'] = preds.row[sampleNumber].squeeze().cpu().numpy()
+                            predictions['col'] = preds.col[sampleNumber].squeeze().cpu().numpy()
+                            outName = f'{pathImage.stem}.png'
+
+                            # Sample data | Features
+                            pathFeatures = pathImage.parent.parent / 'features' / f'{pathImage.stem}.json'
+                            with open(pathFeatures, 'r') as f:
+                                features = json.load(f)
+                            features = {key: np.array(value) for key, value in features.items()}
+
+                            # Draw
+                            row_annot = []
+                            col_annot = []
+
+                            # Draw | Ground truth
+                            gt_row = convert_01_array_to_visual(gt['row'], width=40)
+                            row_annot.append(gt_row)
+                            gt_col = convert_01_array_to_visual(gt['col'], width=40)
+                            col_annot.append(gt_col)
+                        
+                            # Draw | Features | Text is startlike
+                            indicator_textline_like_rowstart = convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20)
+                            row_annot.append(indicator_textline_like_rowstart)
+                            indicator_nearest_right_is_startlike = convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20)
+                            col_annot.append(indicator_nearest_right_is_startlike)
+
+                            # Draw | Features | Words crossed (lighter = fewer words crossed)
+                            wc_row = convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20)
+                            row_annot.append(wc_row)
+                            wc_col = convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
+                            col_annot.append(wc_col)
+
+                            # Draw | Features | Add feature bars
+                            row_annot = np.concatenate(row_annot, axis=1)
+                            img_annot = np.concatenate([img_annot, row_annot], axis=1)
+
+                            col_annot = np.concatenate(col_annot, axis=1).T
+                            col_annot = np.concatenate([col_annot, np.full(shape=(col_annot.shape[0], row_annot.shape[1]), fill_value=LUMINOSITY_FILLER, dtype=np.uint8)], axis=1)
+                            img_annot = np.concatenate([img_annot, col_annot], axis=0)
+
+                            # Draw | Predictions
+                            img_predictions_row = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
+                            indicator_predictions_row = convert_01_array_to_visual(1-predictions['row'], width=img_initial_size[1])
+                            img_predictions_row[:indicator_predictions_row.shape[0], :indicator_predictions_row.shape[1]] = indicator_predictions_row
+                            img_predictions_row = cv.cvtColor(img_predictions_row, code=cv.COLOR_GRAY2RGB)
+                            img_predictions_row[:, :, 0] = 255
+                            img_predictions_row = Image.fromarray(img_predictions_row).convert('RGBA')
+                            img_predictions_row.putalpha(int(0.1*255))
+
+                            img_predictions_col = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
+                            indicator_predictions_col = convert_01_array_to_visual(1-predictions['col'], width=img_initial_size[0]).T
+                            img_predictions_col[:indicator_predictions_col.shape[0], :indicator_predictions_col.shape[1]] = indicator_predictions_col
+                            img_predictions_col = cv.cvtColor(img_predictions_col, code=cv.COLOR_GRAY2RGB)
+                            img_predictions_col[:, :, 0] = 255
+                            img_predictions_col = Image.fromarray(img_predictions_col).convert('RGBA')
+                            img_predictions_col.putalpha(int(0.1*255))
+
+                            img_annot_color = Image.fromarray(cv.cvtColor(img_annot, code=cv.COLOR_GRAY2RGB)).convert('RGBA')
+                            img_predictions = Image.alpha_composite(img_predictions_col, img_predictions_row)
+                            img_complete = Image.alpha_composite(img_annot_color, img_predictions).convert('RGB')
+
+                            img_complete.save(outPath / f'{outName}', format='png')
+
+            eval_loss = eval_loss / batchCount
+            shareCorrect = correct / maxCorrect
+
+            print(f'''Validation
+                Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
+                Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row) | {eval_loss[1].item():.3f} (col)''')
+            
+            if outPath:
+                return outPath
+
+        # Visualize results
+        eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
+        timers['eval'] = perf_counter() - start_eval
+
+        # Close tensorboard writer
+        writer.add_hparams(hparam_dict={'epochs': EPOCHS,
+                                        'batch_size': BATCH_SIZE,
+                                        'max_lr': MAX_LR},
+                        metric_dict={'val_loss': val_loss.sum().item()/len(dataloader_val)})
+        writer.close()
+
+    if TASKS['postprocess']:
+        def preds_to_separators(predArray, paddingSeparator, threshold=0.8):
+            if isinstance(predArray, torch.Tensor):
+                predArray = predArray.cpu().numpy().squeeze()
+                
+            is_separator = (predArray > threshold)
+            diff_in_separator_modus = np.diff(is_separator.astype(np.int8))
+            separators_start = np.where(diff_in_separator_modus == 1)[0]
+            separators_end = np.where(diff_in_separator_modus == -1)[0]
+            separators = np.stack([separators_start, separators_end], axis=1)
+            separators = np.concatenate([paddingSeparator, separators], axis=0)
+            return separators
+
+        # Load model
+        pathModel = PATH_ROOT / 'models' / BEST_RUN
+        pathModelDict =  pathModel / 'best.pt'
+        model.load_state_dict(torch.load(pathModelDict))
+        model.eval()
+
+        # Load OCR reader
+        reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
+
+        # Prepare output folder
+        outPath = pathModel / 'predictions_data'
+        replaceDirs(outPath)
+
+        # Define loop
+        dataloader = dataloader_val
+        outPath = outPath
+        model = model
+
+        # Padding separator
+        paddingSeparator = np.array([[0, 40]])
+
         with torch.no_grad():
             for batchNumber, batch in enumerate(dataloader):
-                # Compute prediction and loss
+                # Compute prediction
                 preds = model(batch.features)
-                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
-                eval_loss += eval_loss_batch
-                correct  += correct_batch
-                maxCorrect  += maxCorrect_batch
 
-                # Visualise
-                if outPath:
-                    batch_size = dataloader.batch_size
-                    for sampleNumber in range(batch_size):      # sampleNumber = 0
-                        # Sample data
-                        # Sample data | Image
-                        pathImage = Path(batch.meta.path_image[sampleNumber])
-                        img_annot = cv.imread(str(pathImage), flags=cv.IMREAD_GRAYSCALE)
-                        img_initial_size = img_annot.shape
-                        
-                        # Sample data | Ground truth
-                        gt = {}
-                        gt['row'] = batch.targets.row[sampleNumber].squeeze().cpu().numpy()
-                        gt['col'] = batch.targets.col[sampleNumber].squeeze().cpu().numpy()
+                # Convert to data
+                batch_size = dataloader.batch_size
+                for sampleNumber in range(batch_size):
+                    # Words
+                    # Words | Parse sample name
+                    image_path = Path(batch.meta.path_image[sampleNumber])
+                    name_full = image_path.stem
+                    name_stem = name_full.split('-p')[0]
 
-                        predictions = {}
-                        predictions['row'] = preds.row[sampleNumber].squeeze().cpu().numpy()
-                        predictions['col'] = preds.col[sampleNumber].squeeze().cpu().numpy()
-                        outName = f'{pathImage.stem}.png'
+                    name_pdf = f"{name_stem}.pdf"
+                    pageNumber = int(name_full.split('-p')[-1].split('_t')[0])
+                    tableNumber = int(name_full.split('_t')[-1])
 
-                        # Sample data | Features
-                        pathFeatures = pathImage.parent.parent / 'features' / f'{pathImage.stem}.json'
-                        with open(pathFeatures, 'r') as f:
-                            features = json.load(f)
-                        features = {key: np.array(value) for key, value in features.items()}
+                    name_words = f"{name_stem}-p{pageNumber}.pq"
+                    wordsPath = PATH_ROOT / 'data' / 'words' / f"{name_words}"
 
-                        # Draw
-                        row_annot = []
-                        col_annot = []
+                    # Words | Use pdf-based words if present
+                    wordsDf = pd.read_parquet(wordsPath)
+                    finalOcrNeeded = (len(wordsDf.query('ocrLabel == "pdf"')) == 0)
 
-                        # Draw | Ground truth
-                        gt_row = convert_01_array_to_visual(gt['row'], width=40)
-                        row_annot.append(gt_row)
-                        gt_col = convert_01_array_to_visual(gt['col'], width=40)
-                        col_annot.append(gt_col)
-                       
-                        # Draw | Features | Text is startlike
-                        indicator_textline_like_rowstart = convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20)
-                        row_annot.append(indicator_textline_like_rowstart)
-                        indicator_nearest_right_is_startlike = convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20)
-                        col_annot.append(indicator_nearest_right_is_startlike)
+                    # Cells     # td: use a class here with rows cols etc
+                    # Cells | Convert predictions to boundaries
+                    separators_row = preds_to_separators(predArray=preds.row[sampleNumber], paddingSeparator=paddingSeparator)
+                    separators_col = preds_to_separators(predArray=preds.col[sampleNumber], paddingSeparator=paddingSeparator)
 
-                        # Draw | Features | Words crossed (lighter = fewer words crossed)
-                        wc_row = convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20)
-                        row_annot.append(wc_row)
-                        wc_col = convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
-                        col_annot.append(wc_col)
+                    # Cells | Convert boundaries to cells
+                    cells = [dict(x0=separators_col[c][1]+1, y0=separators_row[r][1]+1, x1=separators_col[c+1][1], y1=separators_row[r+1][1], row=r, col=c)
+                             for r in range(len(separators_row)-1) for c in range(len(separators_col)-1)]
+                    
+                    # Data 
+                    # Data | OCR by initial cell
+                    img_array = cv.imread(str(image_path), flags=cv.IMREAD_GRAYSCALE)
+                    
+                    for cell in cells:
+                        cell['text'] = ' '.join(reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=0))
+                        print(cell['text'])
 
-                        # Draw | Features | Add feature bars
-                        row_annot = np.concatenate(row_annot, axis=1)
-                        img_annot = np.concatenate([img_annot, row_annot], axis=1)
 
-                        col_annot = np.concatenate(col_annot, axis=1).T
-                        col_annot = np.concatenate([col_annot, np.full(shape=(col_annot.shape[0], row_annot.shape[1]), fill_value=LUMINOSITY_FILLER, dtype=np.uint8)], axis=1)
-                        img_annot = np.concatenate([img_annot, col_annot], axis=0)
+                    
+                    # Visualise
+                    # Visualise | Load image
+                    image = Image.open(image_path).convert('RGBA')
 
-                        # Draw | Predictions
-                        img_predictions_row = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
-                        indicator_predictions_row = convert_01_array_to_visual(1-predictions['row'], width=img_initial_size[1])
-                        img_predictions_row[:indicator_predictions_row.shape[0], :indicator_predictions_row.shape[1]] = indicator_predictions_row
-                        img_predictions_row = cv.cvtColor(img_predictions_row, code=cv.COLOR_GRAY2RGB)
-                        img_predictions_row[:, :, 0] = 255
-                        img_predictions_row = Image.fromarray(img_predictions_row).convert('RGBA')
-                        img_predictions_row.putalpha(int(0.1*255))
+                    # Visualise | Cell annotations
+                    overlay = Image.new('RGBA', image.size, (0,0,0,0))
+                    img_annot = ImageDraw.Draw(overlay)
+                    for cell in cells:
+                        img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill=COLOR_CELL, outline=COLOR_OUTLINE, width=2)
+                    
+                    # Visualise | Save image
+                    image = Image.alpha_composite(image, overlay)
+                    image.show()
 
-                        img_predictions_col = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
-                        indicator_predictions_col = convert_01_array_to_visual(1-predictions['col'], width=img_initial_size[0]).T
-                        img_predictions_col[:indicator_predictions_col.shape[0], :indicator_predictions_col.shape[1]] = indicator_predictions_col
-                        img_predictions_col = cv.cvtColor(img_predictions_col, code=cv.COLOR_GRAY2RGB)
-                        img_predictions_col[:, :, 0] = 255
-                        img_predictions_col = Image.fromarray(img_predictions_col).convert('RGBA')
-                        img_predictions_col.putalpha(int(0.1*255))
 
-                        img_annot_color = Image.fromarray(cv.cvtColor(img_annot, code=cv.COLOR_GRAY2RGB)).convert('RGBA')
-                        img_predictions = Image.alpha_composite(img_predictions_col, img_predictions_row)
-                        img_complete = Image.alpha_composite(img_annot_color, img_predictions).convert('RGB')
-
-                        img_complete.save(outPath / f'{outName}', format='png')
-
-        eval_loss = eval_loss / batchCount
-        shareCorrect = correct / maxCorrect
-
-        print(f'''Validation
-            Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
-            Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row) | {eval_loss[1].item():.3f} (col)''')
         
-        if outPath:
-            return outPath
-
-    # Visualize results
-    eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
-    timers['eval'] = perf_counter() - start_eval
-
-    # Close tensorboard writer
-    writer.add_hparams(hparam_dict={'epochs': EPOCHS,
-                                    'batch_size': BATCH_SIZE,
-                                    'max_lr': MAX_LR},
-                       metric_dict={'val_loss': val_loss.sum().item()/len(dataloader_val)})
-    writer.close()
 
     # Reporting timings
     for key, value in timers.items():
