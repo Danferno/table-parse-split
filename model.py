@@ -40,15 +40,18 @@ def run():
     LUMINOSITY_FILLER = 255
 
     # Model parameters
-    EPOCHS = 200
+    EPOCHS = 100
     BATCH_SIZE = 1
-    MAX_LR = 0.1
+    MAX_LR = 0.08
     HIDDEN_SIZES = [40, 10]
     CONV_LETTER_KERNEL = [4, 4]
     CONV_LETTER_CHANNELS = 2
 
     CONV_FINAL_CHANNELS = CONV_LETTER_CHANNELS
     CONV_FINAL_AVG_COUNT = 4
+
+    CONV_PRED_WINDOWS = (4, 10)
+    CONV_PRED_CHANNELS = 3
 
     LAG_LEAD_STRUCTURE = [-4, -2, -1, 1, 2, 4]
 
@@ -183,8 +186,8 @@ def run():
             self.hidden_sizes = hidden_sizes
             self.layer_depth = layer_depth
 
-            # Convulation on image
-            self.layer_conv = nn.Sequential(OrderedDict([
+            # Convolution on image
+            self.layer_conv_img = nn.Sequential(OrderedDict([
                 ('conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LETTER_CHANNELS, kernel_size=CONV_LETTER_KERNEL, padding='same', padding_mode='replicate', bias=False)),
                 ('norm_conv1', nn.BatchNorm2d(CONV_LETTER_CHANNELS)),
                 ('relu1', nn.ReLU()),
@@ -194,13 +197,19 @@ def run():
             self.layer_avg_col = nn.AdaptiveAvgPool2d(output_size=(CONV_FINAL_AVG_COUNT, None))
 
             # Feature+Conv Neural Net
-            self.layer_linear_row = self.addLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_ROW, out_features=1, activation=nn.ReLU)
-            self.layer_linear_col = self.addLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_COL, out_features=1, activation=nn.ReLU)
+            self.layer_linear_row = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_ROW, out_features=1, activation=nn.ReLU)
+            self.layer_linear_col = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_COL, out_features=1, activation=nn.ReLU)
+
+            # Convolution on predictions
+            self.layer_conv_preds_row = self.addPredConvLayer()
+            self.layer_conv_preds_col = self.addPredConvLayer()
+            self.layer_conv_preds_fc_row = self.addPredConvFullyConnectedLayer(in_features=CONV_PRED_CHANNELS+1)
+            self.layer_conv_preds_fc_col = self.addPredConvFullyConnectedLayer(in_features=CONV_PRED_CHANNELS+1)
 
             # Logit model
             self.layer_logit = nn.Sigmoid()
         
-        def addLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
+        def addLinearLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
             sequence = nn.Sequential(OrderedDict([
                 (f'lin1_from{in_features}_to{self.hidden_sizes[0]}', layerType(in_features=in_features, out_features=self.hidden_sizes[0])),
                 (f'relu_1', activation()),
@@ -209,6 +218,24 @@ def run():
                 (f'relu_2', activation()),
                 # ('norm_lin2', nn.BatchNorm1d(self.hidden_sizes[1])),
                 (f'lin3_from{self.hidden_sizes[1]}_to{out_features}', layerType(in_features=self.hidden_sizes[1], out_features=out_features))
+            ]))
+            return sequence
+            
+        def addPredConvLayer(self):
+            sequence = nn.Sequential(OrderedDict([
+                ('predconv1', nn.Conv1d(in_channels=1, out_channels=CONV_PRED_CHANNELS, kernel_size=CONV_PRED_WINDOWS[0], padding='same', padding_mode='replicate', bias=False)),
+                ('predconv1_norm', nn.BatchNorm1d(CONV_PRED_CHANNELS)),
+                ('predconv1_relu', nn.ReLU()),
+                ('predconv2', nn.Conv1d(in_channels=CONV_PRED_CHANNELS, out_channels=CONV_PRED_CHANNELS, kernel_size=CONV_PRED_WINDOWS[1], padding='same', padding_mode='replicate', bias=False)),
+                ('predconv2_norm', nn.BatchNorm1d(CONV_PRED_CHANNELS)),
+                ('predconv2_relu', nn.ReLU())
+            ]))
+            return sequence
+        def addPredConvFullyConnectedLayer(self, in_features:int, hidden_sizes=[6]):
+            sequence = nn.Sequential(OrderedDict([
+                (f'lin1_from{in_features}_to{hidden_sizes[0]}', nn.Linear(in_features=in_features, out_features=hidden_sizes[0])),
+                (f'relu_1', nn.ReLU()),
+                (f'lin2_from{hidden_sizes[0]}_to1', nn.Linear(in_features=hidden_sizes[0], out_features=1))
             ]))
             return sequence
         
@@ -222,29 +249,39 @@ def run():
                 
             # Image
             # Image | Convolutional layers based on image
-            img_intermediate_values = self.layer_conv(features.image)
+            img_intermediate_values = self.layer_conv_img(features.image)
             row_conv_values = self.layer_avg_row(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)
             col_conv_values = self.layer_avg_col(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)
 
             # Row
+            # Row | Gather input
             row_inputs = torch.cat([features.row, row_conv_values], dim=-1)
-            row_inputs_lag_leads = torch.cat([torch.roll(row_inputs, shifts=shift, dims=1) for shift in LAG_LEAD_STRUCTURE], dim=-1)     # dangerous if no padding applied !!!
-            
+            row_inputs_lag_leads = torch.cat([torch.roll(row_inputs, shifts=shift, dims=1) for shift in LAG_LEAD_STRUCTURE], dim=-1)     # dangerous if no padding applied !!!          
             row_inputs_complete = torch.cat([row_inputs, row_inputs_lag_leads], dim=-1)
-            row_direct_preds = self.layer_linear_row(row_inputs_complete)
             
+            # Row | Linear prediction
+            row_direct_preds = self.layer_linear_row(row_inputs_complete)
+            # row_preds = row_direct_preds      # uncomment for linear prediction
+
+            # Row | Convolved prediction
+            row_conv_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, CONV_PRED_CHANNELS)
+            row_preds = self.layer_conv_preds_fc_row(torch.cat([row_direct_preds, row_conv_preds], dim=-1))
 
             # Col
+            # Col | Gather input
             col_inputs = torch.cat([features.col, col_conv_values], dim=-1)
             col_inputs_lag_leads = torch.cat([torch.roll(col_inputs, shifts=shift, dims=1) for shift in LAG_LEAD_STRUCTURE], dim=-1)     # dangerous if no padding applied !!!
-            
             col_inputs_complete = torch.cat([col_inputs, col_inputs_lag_leads], dim=-1)
+
+            # Col | Linear prediction
             col_direct_preds = self.layer_linear_col(col_inputs_complete)
+            # col_preds = col_direct_preds         # uncomment for linear prediction
+
+            # Col | Convolved prediction
+            col_conv_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, CONV_PRED_CHANNELS)
+            col_preds = self.layer_conv_preds_fc_col(torch.cat([col_direct_preds, col_conv_preds], dim=-1))
            
             # Turn into probabilities
-            row_preds = row_direct_preds
-            col_preds = col_direct_preds
-            
             row_probs = self.layer_logit(row_preds)
             col_probs = self.layer_logit(col_preds)
 
@@ -337,10 +374,10 @@ def run():
             report_batch_size = (size / batch_size) // report_frequency
             if (batchNumber+1) % report_batch_size == 0:
                 epoch_loss, current = epoch_loss.item(), (batchNumber+1) * batch_size
-                print(f'\tAvg epoch loss: {epoch_loss/current:>3f} [{current:>5d}/{size:>5d}]')
+                print(f'\tAvg epoch loss: {epoch_loss/current:.3f} [{current:>5d}/{size:>5d}]')
         
-        print(f'\tEpoch duration: {perf_counter()-start:>2f}')
-        return epoch_loss
+        print(f'\tEpoch duration: {perf_counter()-start:.0f}s')
+        return epoch_loss / len(dataloader)
 
     def val_loop(dataloader, model, lossFunctions):
         batchCount = len(dataloader)
@@ -359,7 +396,7 @@ def run():
 
         print(f'''Validation
             Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
-            Avg val loss: {val_loss.sum().item():>3f} (total) | {val_loss[0].item():>3f} (row) | {val_loss[1].item():>3f} (col)''')
+            Avg val loss: {val_loss.sum().item():.3f} (total) | {val_loss[0].item():.3f} (row) | {val_loss[1].item():.3f} (col)''')
         
         return val_loss.sum()
 
@@ -405,11 +442,10 @@ def run():
                 best_val_loss = val_loss
                 torch.save(model.state_dict(), pathModel / 'best.pt')
 
-            # print(dataset_train.__getitem__.cache_info())
-
         torch.save(model.state_dict(), pathModel / f'last.pt')
 
     if PROFILE:
+        print(dataset_train.__getitem__.cache_info())
         print(prof.key_averages().table(sort_by="self_cpu_time_total"))
     timers['train'] = perf_counter() - start_train
 
@@ -518,7 +554,7 @@ def run():
 
         print(f'''Validation
             Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
-            Avg val loss: {eval_loss.sum().item():>3f} (total) | {eval_loss[0].item():>3f} (row) | {eval_loss[1].item():>3f} (col)''')
+            Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row) | {eval_loss[1].item():.3f} (col)''')
         
         if outPath:
             return outPath
