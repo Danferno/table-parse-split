@@ -30,7 +30,7 @@ def run():
     SUFFIX = 'narrow'
     DATA_TYPE = 'real'
     PROFILE = False
-    TASKS = {'train': False, 'eval': False, 'postprocess':True}
+    TASKS = {'train': False, 'eval': True, 'postprocess':True}
     BEST_RUN = '2023_06_07__13_12'
 
     LOSS_TYPES = ['row', 'col']
@@ -91,36 +91,38 @@ def run():
     # Data
     start_data = perf_counter()
     Sample = namedtuple('sample', ['features', 'targets', 'meta'])
-    Meta = namedtuple('meta', ['path_image'])
+    Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model'])
     Targets = namedtuple('target', LOSS_TYPES)
     Features = namedtuple('features', FEATURE_TYPES)
 
     class TableDataset(Dataset):
         def __init__(self, dir_data,
-                        image_format='.jpg',
+                        image_format='.png',
                         transform_image=None, transform_target=None):
             # Store in self 
             dir_data = Path(dir_data)
             self.dir_images = dir_data / 'images'
             self.dir_features = dir_data / 'features'
             self.dir_labels = dir_data / 'labels'
+            self.dir_meta = dir_data / 'meta'
             self.transform_image = transform_image
             self.transform_target = transform_target
             self.image_format = image_format
-            self.image_size = (600, 400)
 
             # Get filepaths
             self.image_fileEntries = list(os.listdir(self.dir_images))
             self.feature_fileEntries = list(os.listdir(self.dir_features))
             self.label_fileEntries = list(os.listdir(self.dir_labels))
+            self.meta_fileEntries = list(os.listdir(self.dir_meta))
 
             items_images   = set([os.path.splitext(file)[0] for file in self.image_fileEntries])
             items_features = set([os.path.splitext(file)[0] for file in self.feature_fileEntries])
             items_labels   = set([os.path.splitext(file)[0] for file in self.label_fileEntries])
+            items_meta     = set([os.path.splitext(file)[0] for file in self.meta_fileEntries])
 
             # Verify consistency between image/feature/label
-            self.items = sorted(list(items_images.intersection(items_features).intersection(items_labels)))
-            assert len(self.items) == len(items_images) == len(items_features) == len(items_labels), 'Set of images, features and labels do not match.'
+            self.items = sorted(list(items_images.intersection(items_features).intersection(items_labels).intersection(items_meta)))
+            assert len(self.items) == len(items_images) == len(items_features) == len(items_labels) == len(items_meta), 'Set of images, meta, features and labels do not match.'
 
         def __len__(self):
             return len(self.items)  
@@ -130,11 +132,14 @@ def run():
             # Generate paths for a specific item
             pathImage = str(self.dir_images / f'{self.items[idx]}{self.image_format}')
             pathLabel = str(self.dir_labels / f'{self.items[idx]}.json')
+            pathMeta = str(self.dir_meta / f'{self.items[idx]}.json')
             pathFeatures = str(self.dir_features / f'{self.items[idx]}.json')
 
             # Load sample
             # Load sample | Meta
-            meta = Meta(path_image=pathImage)
+            with open(pathMeta, 'r') as f:
+                metaData = json.load(f)
+            meta = Meta(path_image=pathImage, **metaData)
 
             # Load sample | Label
             with open(pathLabel, 'r') as f:
@@ -296,6 +301,7 @@ def run():
             # Output
             return Output(row=row_probs, col=col_probs)
 
+    writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
     model = TabliterModel(hidden_sizes=HIDDEN_SIZES).to(DEVICE)
 
     # Loss function
@@ -436,7 +442,6 @@ def run():
         count_parameters(model=model)
 
         # Model description | Tensorboard
-        writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
         writer.add_graph(model, input_to_model=[sample.features])
         
         start_train = perf_counter()
@@ -463,6 +468,13 @@ def run():
         if PROFILE:
             print(dataset_train.__getitem__.cache_info())
             print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+
+        # Close tensorboard writer
+        writer.add_hparams(hparam_dict={'epochs': EPOCHS,
+                                        'batch_size': BATCH_SIZE,
+                                        'max_lr': MAX_LR},
+                        metric_dict={'val_loss': val_loss.sum().item()/len(dataloader_val)})
+        writer.close()
         timers['train'] = perf_counter() - start_train
 
     if TASKS['eval']:
@@ -493,6 +505,7 @@ def run():
 
                     # Visualise
                     if outPath:
+                        os.makedirs(outPath, exist_ok=True)
                         batch_size = dataloader.batch_size
                         for sampleNumber in range(batch_size):      # sampleNumber = 0
                             # Sample data
@@ -584,13 +597,6 @@ def run():
         eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
         timers['eval'] = perf_counter() - start_eval
 
-        # Close tensorboard writer
-        writer.add_hparams(hparam_dict={'epochs': EPOCHS,
-                                        'batch_size': BATCH_SIZE,
-                                        'max_lr': MAX_LR},
-                        metric_dict={'val_loss': val_loss.sum().item()/len(dataloader_val)})
-        writer.close()
-
     if TASKS['postprocess']:
         def preds_to_separators(predArray, paddingSeparator, threshold=0.8, setToMidpoint=False):
             # Tensor > np.array on cpu
@@ -642,6 +648,7 @@ def run():
 
         # Padding separator
         paddingSeparator = np.array([[0, 40]])
+        TableRect = namedtuple('tableRect', field_names=['x0', 'x1', 'y0', 'y1'])
 
         with torch.no_grad():
             for batch in tqdm(dataloader):
@@ -655,7 +662,7 @@ def run():
                     # Words | Parse sample name
                     image_path = Path(batch.meta.path_image[sampleNumber])
                     name_full = image_path.stem
-                    name_stem = name_full.split('-p')[0]
+                    name_stem = batch.meta.name_stem[sampleNumber]
 
                     name_pdf = f"{name_stem}.pdf"
                     pageNumber = int(name_full.split('-p')[-1].split('_t')[0])
@@ -665,7 +672,14 @@ def run():
                     wordsPath = PATH_ROOT / 'data' / 'words' / f"{name_words}"
 
                     # Words | Use pdf-based words if present
-                    wordsDf = pd.read_parquet(wordsPath)
+                    tableRect = TableRect(**{key: value[sampleNumber].item() for key, value in batch.meta.table_coords.items()})
+                    dpi_pdf = batch.meta.dpi_pdf[sampleNumber].item()
+                    dpi_model = batch.meta.dpi_model[sampleNumber].item()
+                    padding_model = batch.meta.padding_model[sampleNumber].item()
+                    dpi_words = batch.meta.dpi_words[sampleNumber].item()
+
+                    wordsDf = pd.read_parquet(wordsPath).drop_duplicates()
+                    wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] = (wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] * (dpi_pdf / dpi_words))
                     finalOcrNeeded = (len(wordsDf.query('ocrLabel == "pdf"')) == 0)
 
                     # Cells
@@ -681,10 +695,20 @@ def run():
                     # Data | OCR by initial cell
                     if finalOcrNeeded:                     
                         img_array = cv.imread(str(image_path), flags=cv.IMREAD_GRAYSCALE)
-                        
                         for cell in cells:
                             cell['text'] = ' '.join(reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=0))
                     else:
+                        # Reduce wordsDf to table dimensions
+                        wordsDf = wordsDf.loc[(wordsDf['top'] >= tableRect.y0) & (wordsDf['left'] >= tableRect.x0) & (wordsDf['bottom'] <= tableRect.y1) & (wordsDf['right'] <= tableRect.x1)]
+
+                        # Adapt wordsDf coordinates to model table coordinates
+                        wordsDf.loc[:, ['left', 'right']] = wordsDf.loc[:, ['left', 'right']] - tableRect.x0
+                        wordsDf.loc[:, ['top', 'bottom']] = wordsDf.loc[:, ['top', 'bottom']] - tableRect.y0
+                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_model / dpi_pdf) + padding_model
+                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']].round(0).astype(int)
+
+                        # Assign text to cells #TD
+
                         raise Exception('not yet implemented')
 
                     # Data | Convert to dataframe
