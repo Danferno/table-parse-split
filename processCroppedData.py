@@ -25,7 +25,7 @@ np.seterr(all='raise')
 
 # Constants
 DEBUG = False
-PARALLEL = False
+PARALLEL = True
 SEPARATOR_TYPE = 'narrow'
 
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -88,6 +88,7 @@ replaceDirs(pathOut_all / 'images')
 replaceDirs(pathOut_all / 'labels')
 replaceDirs(pathOut_all / 'features')
 replaceDirs(pathOut_all / 'images_text_and_gt')
+replaceDirs(pathOut_all / 'meta')
 
 # Helper classes
 class NumpyEncoder(json.JSONEncoder):
@@ -809,7 +810,6 @@ def calculate_image_similarity(img1, img2):
 
     return score
 
-
 def processPdf(pdfName):
     pd.set_option("mode.copy_on_write", True)
 
@@ -916,7 +916,7 @@ def processPdf(pdfName):
                 return luminosity
 
             # Save | Visual | Image
-            pathOut_img = str(pathOut_all / 'images' / f'{tableName}.jpg')
+            pathOut_img = str(pathOut_all / 'images' / f'{tableName}.png')
             cv.imwrite(filename=pathOut_img, img=img_cv)
 
             # Save | Visual | Image with ground truth and text feature
@@ -989,6 +989,19 @@ def processPdf(pdfName):
             pathOut_labels = pathOut_all / 'labels' / f'{tableName}.json'
             with open(pathOut_labels, 'w') as labelFile:
                 json.dump(gt, labelFile, cls=NumpyEncoder)
+
+            # Save | Meta
+            meta = {}
+            meta['table_coords'] = dict(x0=tableRect.x0, x1=tableRect.x1, y0=tableRect.y0, y1=tableRect.y1)
+            meta['dpi_pdf'] = DPI_PYMUPDF
+            meta['dpi_model'] = DPI_TARGET
+            meta['dpi_words'] = DPI_OCR
+            meta['padding_model'] = PADDING
+            meta['name_stem'] = Path(pdfName).stem
+
+            pathOut_meta = pathOut_all / 'meta' / f'{tableName}.json'
+            with open(pathOut_meta, 'w') as metaFile:
+                json.dump(meta, metaFile)
     
     return (tables, errors)
 
@@ -1013,4 +1026,4 @@ print(f'Tables parsed: {tables}\nErrors: {errors} ({(errors/tables*100):.00f}%)'
 
 # Split into train/val/test
 from generateFakeData import splitData
-splitData(pathIn=pathOut_all)
+splitData(pathIn=pathOut_all, imageFormat='.png', trainRatio=0.85, valRatio=0.1)
