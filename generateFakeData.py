@@ -88,7 +88,7 @@ def getSpellLengths(inarray):
             z = np.diff(np.append(-1, i)) / n        # run lengths
             return z
 
-def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1):
+def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1, imageFormat='.jpg'):
     items = [os.path.splitext(entry.name)[0] for entry in os.scandir(pathIn / 'images')]
     random.shuffle(items)
 
@@ -97,12 +97,13 @@ def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1):
 
     for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
         destPath = pathIn.parent / subgroup
-        os.makedirs(destPath / 'images', exist_ok=True); os.makedirs(destPath / 'labels', exist_ok=True); os.makedirs(destPath / 'features', exist_ok=True)
+        os.makedirs(destPath / 'images', exist_ok=True); os.makedirs(destPath / 'labels', exist_ok=True); os.makedirs(destPath / 'features', exist_ok=True); os.makedirs(destPath / 'meta', exist_ok=True)
 
         for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
-            _ = shutil.copyfile(src=pathIn / 'images'   / f'{item}.jpg',  dst=destPath / 'images' / f'{item}.jpg')
-            _ = shutil.copyfile(src=pathIn / 'labels'   / f'{item}.json', dst=destPath / 'labels' / f'{item}.json')
+            _ = shutil.copyfile(src=pathIn / 'images'   / f'{item}{imageFormat}',  dst=destPath / 'images'   / f'{item}{imageFormat}')
+            _ = shutil.copyfile(src=pathIn / 'labels'   / f'{item}.json', dst=destPath / 'labels'   / f'{item}.json')
             _ = shutil.copyfile(src=pathIn / 'features' / f'{item}.json', dst=destPath / 'features' / f'{item}.json')
+            _ = shutil.copyfile(src=pathIn / 'meta'     / f'{item}.json', dst=destPath / 'meta'     / f'{item}.json')
 
 
 # Make folders
