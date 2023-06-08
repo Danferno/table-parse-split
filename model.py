@@ -22,6 +22,8 @@ def run():
     from PIL import Image, ImageDraw
     import pandas as pd
     import easyocr
+    from collections import Counter
+    from tqdm import tqdm
     
     # Constants
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -443,7 +445,9 @@ def run():
             for epoch in range(EPOCHS):
                 learning_rate = scheduler.get_last_lr()[0]
                 print(f"\nEpoch {epoch+1} of {EPOCHS}. Learning rate: {learning_rate:03f}")
+                model.train()
                 train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4)
+                model.eval()
                 val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
 
                 writer.add_scalar('Train loss', scalar_value=train_loss, global_step=epoch)
@@ -588,7 +592,8 @@ def run():
         writer.close()
 
     if TASKS['postprocess']:
-        def preds_to_separators(predArray, paddingSeparator, threshold=0.8):
+        def preds_to_separators(predArray, paddingSeparator, threshold=0.8, setToMidpoint=False):
+            # Tensor > np.array on cpu
             if isinstance(predArray, torch.Tensor):
                 predArray = predArray.cpu().numpy().squeeze()
                 
@@ -598,7 +603,24 @@ def run():
             separators_end = np.where(diff_in_separator_modus == -1)[0]
             separators = np.stack([separators_start, separators_end], axis=1)
             separators = np.concatenate([paddingSeparator, separators], axis=0)
+            
+            # Convert wide separator to midpoint
+            if setToMidpoint:
+                separator_means = np.floor(separators.mean(axis=1)).astype(np.int32)
+                separators = np.stack([separator_means, separator_means+1], axis=1)
+
             return separators
+        def get_first_non_null_values(df):
+            return df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].values.squeeze()
+        def number_duplicates(l):
+            counter = Counter()
+
+            for v in l:
+                counter[v] += 1
+                if counter[v]>1:
+                    yield v+f'-{counter[v]}'
+                else:
+                    yield v
 
         # Load model
         pathModel = PATH_ROOT / 'models' / BEST_RUN
@@ -622,7 +644,7 @@ def run():
         paddingSeparator = np.array([[0, 40]])
 
         with torch.no_grad():
-            for batchNumber, batch in enumerate(dataloader):
+            for batch in tqdm(dataloader):
                 # Compute prediction
                 preds = model(batch.features)
 
@@ -646,10 +668,10 @@ def run():
                     wordsDf = pd.read_parquet(wordsPath)
                     finalOcrNeeded = (len(wordsDf.query('ocrLabel == "pdf"')) == 0)
 
-                    # Cells     # td: use a class here with rows cols etc
+                    # Cells
                     # Cells | Convert predictions to boundaries
-                    separators_row = preds_to_separators(predArray=preds.row[sampleNumber], paddingSeparator=paddingSeparator)
-                    separators_col = preds_to_separators(predArray=preds.col[sampleNumber], paddingSeparator=paddingSeparator)
+                    separators_row = preds_to_separators(predArray=preds.row[sampleNumber], paddingSeparator=paddingSeparator, setToMidpoint=True)
+                    separators_col = preds_to_separators(predArray=preds.col[sampleNumber], paddingSeparator=paddingSeparator, setToMidpoint=True)
 
                     # Cells | Convert boundaries to cells
                     cells = [dict(x0=separators_col[c][1]+1, y0=separators_row[r][1]+1, x1=separators_col[c+1][1], y1=separators_row[r+1][1], row=r, col=c)
@@ -657,13 +679,63 @@ def run():
                     
                     # Data 
                     # Data | OCR by initial cell
-                    img_array = cv.imread(str(image_path), flags=cv.IMREAD_GRAYSCALE)
+                    if finalOcrNeeded:                     
+                        img_array = cv.imread(str(image_path), flags=cv.IMREAD_GRAYSCALE)
+                        
+                        for cell in cells:
+                            cell['text'] = ' '.join(reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=0))
+                    else:
+                        raise Exception('not yet implemented')
+
+                    # Data | Convert to dataframe
+                    df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
+                    df = df.dropna(axis='columns', how='all').dropna(axis='index', how='all').reset_index(drop=True)
+
+                    # Data | Clean
+                    # Data | Clean | Combine "(" ")" columns
+                    uniques = {col: set(df[col].unique()) for col in df.columns}
+                    onlyParenthesis_open =  [col for col, unique in uniques.items() if unique == set([pd.NA, '('])]
+                    onlyParenthesis_close = [col for col, unique in uniques.items() if unique == set([pd.NA, ')'])]
+
+                    for col in onlyParenthesis_open:
+                        parenthesis_colIndex = df.columns.tolist().index(col)
+                        if parenthesis_colIndex == (len(df.columns) - 1):           # Drop if last column only contains (
+                            df = df.drop(columns=[col])
+                        else:                                                       # Otherwise add to next column
+                            target_col = df.columns[parenthesis_colIndex+1]
+                            df[target_col] = df[target_col] + df[col]               
+                    for col in onlyParenthesis_close:
+                        parenthesis_colIndex = df.columns.tolist().index(col)
+                        if parenthesis_colIndex == 0:                               # Drop if first column only contains )
+                            df = df.drop(columns=[col])
+                        else:                                                       # Otherwise add to previous column
+                            target_col = df.columns[parenthesis_colIndex-1]
+                            df[target_col] = df[target_col] + df[col]               
+                            df = df.drop(columns=[col])
+
+                    # Data | Clean | If last column only contains 1 or |, it is probably an OCR error
+                    ocr_mistakes_verticalLine = set([pd.NA, '1', '|'])
+                    if len(set(df.iloc[:, -1].unique()).difference(ocr_mistakes_verticalLine)) == 0:
+                        df = df.drop(df.columns[-1],axis=1)
+
+                    # Data | Clean | Column names
+                    # Data | Clean | Column names | First column is probably label column (if longest string in columns)
+                    longestStringLengths = {col: df.loc[1:, col].str.len().max() for col in df.columns}
+                    longestString = max(longestStringLengths, key=longestStringLengths.get)
+                    if longestString == 0:
+                        df.loc[0, longestString] = 'Labels'
+
+                    # Data | Clean | Column names | Replace column names by first non missing element in first five rows
+                    df.columns = get_first_non_null_values(df)
+                    df.columns = list(number_duplicates(df.columns))
+                    df = df.drop(index=0).reset_index(drop=True)
                     
-                    for cell in cells:
-                        cell['text'] = ' '.join(reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=0))
-                        print(cell['text'])
+                    # Data | Clean | Drop rows with only label and code information
+                    valueColumns = [col for col in df.columns if (col is pd.NA) or ((col not in ['Labels']) and not (col.startswith('Codes')))]
+                    df = df.dropna(axis='index', subset=valueColumns, how='all').reset_index(drop=True)
 
-
+                    # Data | Save
+                    df.to_parquet(outPath / f'{name_full}.pq')
                     
                     # Visualise
                     # Visualise | Load image
@@ -676,10 +748,8 @@ def run():
                         img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill=COLOR_CELL, outline=COLOR_OUTLINE, width=2)
                     
                     # Visualise | Save image
-                    image = Image.alpha_composite(image, overlay)
-                    image.show()
-
-
+                    image = Image.alpha_composite(image, overlay).convert('RGB')
+                    image.save(outPath / f'{name_full}.png')
         
 
     # Reporting timings
