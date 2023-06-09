@@ -19,11 +19,12 @@ def run():
     from datetime import datetime
     from time import perf_counter
     from functools import cache
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
     import pandas as pd
     import easyocr
     from collections import Counter
     from tqdm import tqdm
+    import fitz        # type: ignore
     
     # Constants
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -91,7 +92,7 @@ def run():
     # Data
     start_data = perf_counter()
     Sample = namedtuple('sample', ['features', 'targets', 'meta'])
-    Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model'])
+    Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model', 'image_angle'])
     Targets = namedtuple('target', LOSS_TYPES)
     Features = namedtuple('features', FEATURE_TYPES)
 
@@ -617,7 +618,7 @@ def run():
 
             return separators
         def get_first_non_null_values(df):
-            return df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].values.squeeze()
+            return df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].fillna('empty').values.squeeze()
         def number_duplicates(l):
             counter = Counter()
 
@@ -627,7 +628,16 @@ def run():
                     yield v+f'-{counter[v]}'
                 else:
                     yield v
+        def boxes_intersect(box, box_target):
+            overlap_x = ((box['x0'] >= box_target['x0']) & (box['x0'] < box_target['x1'])) | ((box['x1'] >= box_target['x0']) & (box['x0'] < box_target['x0']))
+            overlap_y = ((box['y0'] >= box_target['y0']) & (box['y0'] < box_target['y1'])) | ((box['y1'] >= box_target['y0']) & (box['y0'] < box_target['y0']))
 
+            return all([overlap_x, overlap_y])
+        def scale_cell_to_dpi(cell, dpi_start, dpi_target):
+            for key in ['x0', 'x1', 'y0', 'y1']:
+                cell[key] = int((cell[key]*dpi_target/dpi_start).round(0))
+            return cell
+        
         # Load model
         pathModel = PATH_ROOT / 'models' / BEST_RUN
         pathModelDict =  pathModel / 'best.pt'
@@ -649,6 +659,8 @@ def run():
         # Padding separator
         paddingSeparator = np.array([[0, 40]])
         TableRect = namedtuple('tableRect', field_names=['x0', 'x1', 'y0', 'y1'])
+        FONT_TEXT = ImageFont.truetype('arial.ttf', size=24)
+        FONT_BIG = ImageFont.truetype('arial.ttf', size=48)
 
         with torch.no_grad():
             for batch in tqdm(dataloader):
@@ -677,10 +689,11 @@ def run():
                     dpi_model = batch.meta.dpi_model[sampleNumber].item()
                     padding_model = batch.meta.padding_model[sampleNumber].item()
                     dpi_words = batch.meta.dpi_words[sampleNumber].item()
+                    angle = batch.meta.image_angle[sampleNumber].item()
 
                     wordsDf = pd.read_parquet(wordsPath).drop_duplicates()
                     wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] = (wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] * (dpi_pdf / dpi_words))
-                    finalOcrNeeded = (len(wordsDf.query('ocrLabel == "pdf"')) == 0)
+                    textSource = 'ocr-based' if len(wordsDf.query('ocrLabel == "pdf"')) == 0 else 'pdf-based'
 
                     # Cells
                     # Cells | Convert predictions to boundaries
@@ -690,13 +703,32 @@ def run():
                     # Cells | Convert boundaries to cells
                     cells = [dict(x0=separators_col[c][1]+1, y0=separators_row[r][1]+1, x1=separators_col[c+1][1], y1=separators_row[r+1][1], row=r, col=c)
                              for r in range(len(separators_row)-1) for c in range(len(separators_col)-1)]
-                    
+                    cells = [scale_cell_to_dpi(cell, dpi_start=dpi_model, dpi_target=dpi_words) for cell in cells]
+
+                    # Extract image from pdf
+                    pdf = fitz.open(PATH_ROOT / 'data' / 'pdfs' / name_pdf)
+                    page = pdf.load_page(pageNumber-1)
+                    img = page.get_pixmap(dpi=dpi_words, clip=(tableRect.x0, tableRect.y0, tableRect.x1, tableRect.y1), colorspace=fitz.csGRAY)
+                    img = np.frombuffer(img.samples, dtype=np.uint8).reshape(img.height, img.width, img.n)
+                    _, img_array = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+                    img_tight = Image.fromarray(img_array)
+                    scale_factor = dpi_words/dpi_model
+                    img = Image.new(img_tight.mode, (int(img_tight.width+PADDING*2*scale_factor), int(img_tight.height+PADDING*2*scale_factor)), 255)
+                    img.paste(img_tight, (int(PADDING*scale_factor), int(PADDING*scale_factor)))
+                    img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)     
+
                     # Data 
                     # Data | OCR by initial cell
-                    if finalOcrNeeded:                     
-                        img_array = cv.imread(str(image_path), flags=cv.IMREAD_GRAYSCALE)
+                    if textSource == 'ocr-based':                     
+                        img_array = np.array(img)
+
                         for cell in cells:
-                            cell['text'] = ' '.join(reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=0))
+                            textList = reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=1)
+                            if textList:
+                                textList_sorted = sorted(textList, key=lambda el: (el[0][0][1]//10, el[0][0][0]))       # round height to the lowest ten to avoid height mismatch from fucking things up
+                                cell['text'] = ' '.join([el[1] for el in textList_sorted])
+                            else:
+                                cell['text'] = ''
                     else:
                         # Reduce wordsDf to table dimensions
                         wordsDf = wordsDf.loc[(wordsDf['top'] >= tableRect.y0) & (wordsDf['left'] >= tableRect.x0) & (wordsDf['bottom'] <= tableRect.y1) & (wordsDf['right'] <= tableRect.x1)]
@@ -704,12 +736,14 @@ def run():
                         # Adapt wordsDf coordinates to model table coordinates
                         wordsDf.loc[:, ['left', 'right']] = wordsDf.loc[:, ['left', 'right']] - tableRect.x0
                         wordsDf.loc[:, ['top', 'bottom']] = wordsDf.loc[:, ['top', 'bottom']] - tableRect.y0
-                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_model / dpi_pdf) + padding_model
-                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']].round(0).astype(int)
+                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_words / dpi_pdf) + padding_model * (dpi_words/dpi_model)
+                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']]
+                        wordsDf = wordsDf.rename(columns={'left': 'x0', 'right': 'x1', 'top': 'y0', 'bottom': 'y1'})
 
-                        # Assign text to cells #TD
-
-                        raise Exception('not yet implemented')
+                        # Assign text to cells
+                        for cell in cells:
+                            overlap = wordsDf.apply(lambda row: boxes_intersect(box=cell, box_target=row), axis=1)
+                            cell['text'] = ' '.join(wordsDf.loc[overlap, 'text'])
 
                     # Data | Convert to dataframe
                     df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
@@ -762,18 +796,19 @@ def run():
                     df.to_parquet(outPath / f'{name_full}.pq')
                     
                     # Visualise
-                    # Visualise | Load image
-                    image = Image.open(image_path).convert('RGBA')
-
                     # Visualise | Cell annotations
-                    overlay = Image.new('RGBA', image.size, (0,0,0,0))
+                    overlay = Image.new('RGBA', img.size, (0,0,0,0))
                     img_annot = ImageDraw.Draw(overlay)
                     for cell in cells:
                         img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill=COLOR_CELL, outline=COLOR_OUTLINE, width=2)
+                        if cell['text']:
+                            img_annot.rectangle(xy=img_annot.textbbox((cell['x0'], cell['y0']), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 128))
+                            img_annot.text(xy=(cell['x0'], cell['y0']), text=cell['text'], fill=(0, 0, 0, 180), anchor='la', font=FONT_TEXT,)
+                    img_annot.text(xy=(img.width // 2, img.height // 20 * 19), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 180), anchor='ld')
                     
                     # Visualise | Save image
-                    image = Image.alpha_composite(image, overlay).convert('RGB')
-                    image.save(outPath / f'{name_full}.png')
+                    img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+                    img.save(outPath / f'{name_full}.png')
         
 
     # Reporting timings
