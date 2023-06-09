@@ -97,7 +97,7 @@ def splitData(pathIn=pathAll, trainRatio=0.8, valRatio=0.1, imageFormat='.jpg'):
 
     for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
         destPath = pathIn.parent / subgroup
-        os.makedirs(destPath / 'images', exist_ok=True); os.makedirs(destPath / 'labels', exist_ok=True); os.makedirs(destPath / 'features', exist_ok=True); os.makedirs(destPath / 'meta', exist_ok=True)
+        replaceDirs(destPath / 'images'); replaceDirs(destPath / 'labels'); replaceDirs(destPath / 'features'); replaceDirs(destPath / 'meta')
 
         for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
             _ = shutil.copyfile(src=pathIn / 'images'   / f'{item}{imageFormat}',  dst=destPath / 'images'   / f'{item}{imageFormat}')
