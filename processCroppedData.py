@@ -25,7 +25,7 @@ np.seterr(all='raise')
 
 # Constants
 DEBUG = False
-PARALLEL = True
+PARALLEL = {'words': False, 'process': True}
 SEPARATOR_TYPE = 'narrow'
 
 PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -233,6 +233,7 @@ def harmonise_bbox_height(textDf):
 
 def deskew_img_from_file(pageName, img, skewFiles):
     page_skewFiles = [skewFile for skewFile in skewFiles if pageName in skewFile]
+    angle_mode = 0
     if page_skewFiles:
         angles = []
         for skewFile in page_skewFiles:
@@ -243,7 +244,7 @@ def deskew_img_from_file(pageName, img, skewFiles):
         angle_mode = angles[np.argmax(counts)]
         img = img.rotate(angle_mode, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
 
-    return img
+    return img, angle_mode
 
 BoxIntersect = namedtuple('BoxIntersect', field_names=['left', 'right', 'top', 'bottom', 'intersect', 'Index'])
 def boxes_intersect(box, box_target):
@@ -272,7 +273,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
     skewFiles = glob(stub)
 
     # Get words from appropriate pages
-    for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL):
+    for pageIteration, _ in tqdm(enumerate(pageNumbers), position=1, leave=False, desc='Looping over pages', total=len(pageNumbers), disable=PARALLEL['words']):
         # Get words from page | Load page
         pageNumber = pageNumbers[pageIteration]
         page:fitz.Page = doc.load_page(page_id=pageNumber)
@@ -450,7 +451,7 @@ def pdf_to_words(labelFiles_byPdf_dict, reader=None):
         img.convert('RGB').save(f'{os.path.splitext(outPath)[0]}.jpg', quality=30)
 
 
-if PARALLEL:
+if PARALLEL['words']:
     results = Parallel(n_jobs=5, backend='loky', verbose=9)(delayed(pdf_to_words)(labelFiles_byPdf_dict) for labelFiles_byPdf_dict in tabledetect_labelFiles_byPdf.items())
 else:
     reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
@@ -854,7 +855,7 @@ def processPdf(pdfName):
             img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
             img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
             img.paste(img_tight, (PADDING, PADDING))
-            img = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
+            img, angle = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
 
             # Ensure nothing went wrong in table numbering (not always consistent)
             img_sent_to_annotator = Image.open(PATH_ANNOTATOR_IMAGES / f'{tableName}.jpg').convert(mode='L')
@@ -869,7 +870,7 @@ def processPdf(pdfName):
                     img_tight_temp = Image.frombytes(mode='L', size=(img_tight_temp.width, img_tight_temp.height), data=img_tight_temp.samples)
                     img_temp = Image.new(img_tight_temp.mode, (img_tight_temp.width+PADDING*2, img_tight_temp.height+PADDING*2), 255)
                     img_temp.paste(img_tight_temp, (PADDING, PADDING))
-                    img_temp = deskew_img_from_file(pageName=pageName, img=img_temp, skewFiles=skewFiles)            
+                    img_temp, angle_temp = deskew_img_from_file(pageName=pageName, img=img_temp, skewFiles=skewFiles)            
                     similarity_index = calculate_image_similarity(img1=img_temp, img2=img_sent_to_annotator)
                     similarity_indices[tableIteration] = similarity_index
 
@@ -884,7 +885,7 @@ def processPdf(pdfName):
                 img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
                 img = Image.new(img_tight.mode, (img_tight.width+PADDING*2, img_tight.height+PADDING*2), 255)
                 img.paste(img_tight, (PADDING, PADDING))             
-                img = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
+                img, angle = deskew_img_from_file(pageName=pageName, img=img, skewFiles=skewFiles)            
 
             if skip_table:
                 continue
@@ -998,6 +999,7 @@ def processPdf(pdfName):
             meta['dpi_words'] = DPI_OCR
             meta['padding_model'] = PADDING
             meta['name_stem'] = Path(pdfName).stem
+            meta['image_angle'] = angle
 
             pathOut_meta = pathOut_all / 'meta' / f'{tableName}.json'
             with open(pathOut_meta, 'w') as metaFile:
@@ -1008,7 +1010,7 @@ def processPdf(pdfName):
 with open(pathOut_all / 'images_text_and_gt' / 'legend.json', 'w') as f:
     json.dump({'horizontal': ['img', 'within text rectangle', 'between textlines like rowstart', 'words crossed (rel to max)'],
                'vertical': ['img', 'within text rectangle', 'nearest right text is startlike', 'words crossed (rel to max)']}, f, indent=2)
-if PARALLEL:
+if PARALLEL['process']:
     results = Parallel(n_jobs=-1, backend='loky', verbose=9)(delayed(processPdf)(pdfName) for pdfName in tabledetect_labelFiles_byPdf)
     tables, errors = zip(*results)
     tables = sum(tables)
