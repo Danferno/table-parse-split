@@ -31,11 +31,12 @@ def run():
     SUFFIX = 'narrow'
     DATA_TYPE = 'real'
     PROFILE = False
-    TASKS = {'train': False, 'eval': True, 'postprocess':True}
-    BEST_RUN = '2023_06_07__13_12'
+    TASKS = {'train': False, 'eval': False, 'postprocess':True}
+    BEST_RUN = '2023_06_09__15_01'
+    # BEST_RUN = None
 
     LOSS_TYPES = ['row', 'col']
-    FEATURE_TYPES = LOSS_TYPES + ['image']
+    FEATURE_TYPES = LOSS_TYPES + ['image', 'row_global', 'col_global']
 
     COMMON_VARIABLES = ['{}_avg', '{}_absDiff', '{}_spell_mean', '{}_spell_sd', '{}_wordsCrossed_count', '{}_wordsCrossed_relToMax']
     ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart']
@@ -48,14 +49,19 @@ def run():
 
     PADDING = 40
     TRUTH_THRESHOLD = 0.6
-    COLOR_CELL = (102, 153, 255, int(0.1*255))      # light blue
-    COLOR_OUTLINE = (255, 255, 255, int(0.9*255))
+    COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
+    COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
 
     # Model parameters
-    EPOCHS = 100
+    EPOCHS = 150
     BATCH_SIZE = 1
     MAX_LR = 0.08
-    HIDDEN_SIZES = [40, 10]
+    HIDDEN_SIZES = [45, 15]
+
+    CONV_LINESCANNER_SIZE = 10
+    CONV_LINESCANNER_CHANNELS = 2
+    CONV_LINESCANNER_KEEPTOPX = 5
+
     CONV_LETTER_KERNEL = [4, 4]
     CONV_LETTER_CHANNELS = 2
 
@@ -67,8 +73,8 @@ def run():
 
     LAG_LEAD_STRUCTURE = [-4, -2, -1, 1, 2, 4]
 
-    FEATURE_COUNT_ROW = (len(COMMON_VARIABLES + ROW_VARIABLES + COMMON_GLOBAL_VARIABLES) + CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)*(len(LAG_LEAD_STRUCTURE) + 1)
-    FEATURE_COUNT_COL = (len(COMMON_VARIABLES + COL_VARIABLES + COMMON_GLOBAL_VARIABLES) + CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)*(len(LAG_LEAD_STRUCTURE) + 1)
+    FEATURE_COUNT_ROW = (len(COMMON_VARIABLES + ROW_VARIABLES) + CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)*(len(LAG_LEAD_STRUCTURE) + 1) + len(COMMON_GLOBAL_VARIABLES) + CONV_LINESCANNER_CHANNELS*CONV_LINESCANNER_KEEPTOPX
+    FEATURE_COUNT_COL = (len(COMMON_VARIABLES + COL_VARIABLES) + CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)*(len(LAG_LEAD_STRUCTURE) + 1) + len(COMMON_GLOBAL_VARIABLES) + CONV_LINESCANNER_CHANNELS*CONV_LINESCANNER_KEEPTOPX
 
     # Derived constants
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -155,12 +161,12 @@ def run():
             # Load sample | Features | Rows
             features_row = torch.cat(tensors=[Tensor(featuresData[common_variable.format('row')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=1)
             features_row = torch.cat([features_row, *[Tensor(featuresData[row_variable]).unsqueeze(-1) for row_variable in ROW_VARIABLES]], dim=1)
-            features_row = torch.cat([features_row, *[Tensor([featuresData[global_common_variable.format('row')]]).broadcast_to((features_row.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES]], dim=1)
+            features_row_global = torch.cat([Tensor([featuresData[global_common_variable.format('row')]]).broadcast_to((features_row.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES], dim=1)
 
             # Load sample | Features | Cols
             features_col = torch.cat(tensors=[Tensor(featuresData[common_variable.format('col')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=1)
             features_col = torch.cat([features_col, *[Tensor(featuresData[col_variable]).unsqueeze(-1) for col_variable in COL_VARIABLES]], dim=1)
-            features_col = torch.cat([features_col, *[Tensor([featuresData[global_common_variable.format('col')]]).broadcast_to((features_col.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES]], dim=1)
+            features_col_global = torch.cat([Tensor([featuresData[global_common_variable.format('col')]]).broadcast_to((features_col.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES], dim=1)
         
             # Load sample | Features | Image (0-1 float)
             image = read_image(pathImage, mode=ImageReadMode.GRAY).to(dtype=torch.float32) / 255
@@ -173,7 +179,7 @@ def run():
                     sample['labels'][labelType] = self.transform_target(sample['labels'][labelType])
 
             # Collect in namedtuples
-            features = Features(row=features_row, col=features_col, image=image)
+            features = Features(row=features_row, col=features_col, row_global=features_row_global, col_global=features_col_global, image=image)
             sample = Sample(features=features, targets=targets, meta=meta)
 
             # Return sample
@@ -200,6 +206,10 @@ def run():
             self.hidden_sizes = hidden_sizes
             self.layer_depth = layer_depth
 
+            # Line scanner
+            self.layer_ls_row = self.addLineScanner(orientation='rows')
+            self.layer_ls_col = self.addLineScanner(orientation='cols')
+
             # Convolution on image
             self.layer_conv_img = nn.Sequential(OrderedDict([
                 ('conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LETTER_CHANNELS, kernel_size=CONV_LETTER_KERNEL, padding='same', padding_mode='replicate', bias=False)),
@@ -207,8 +217,8 @@ def run():
                 ('relu1', nn.ReLU()),
                 # ('conv2', nn.Conv2d(in_channels=5, out_channels=2, kernel_size=CONV_SEQUENCE_KERNEL, padding='same', padding_mode='replicate')),
             ]))
-            self.layer_avg_row = nn.AdaptiveAvgPool2d(output_size=(None, CONV_FINAL_AVG_COUNT))
-            self.layer_avg_col = nn.AdaptiveAvgPool2d(output_size=(CONV_FINAL_AVG_COUNT, None))
+            self.layer_conv_avg_row = nn.AdaptiveAvgPool2d(output_size=(None, CONV_FINAL_AVG_COUNT))
+            self.layer_conv_avg_col = nn.AdaptiveAvgPool2d(output_size=(CONV_FINAL_AVG_COUNT, None))
 
             # Feature+Conv Neural Net
             self.layer_linear_row = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_ROW, out_features=1, activation=nn.ReLU)
@@ -223,6 +233,17 @@ def run():
             # Logit model
             self.layer_logit = nn.Sigmoid()
         
+        def addLineScanner(self, orientation):
+            kernel = (1, CONV_LINESCANNER_SIZE) if orientation == 'rows' else (CONV_LINESCANNER_SIZE, 1)
+            max_transformer = (None, 1) if orientation == 'rows' else (None, 1)
+            sequence = nn.Sequential(OrderedDict([
+                (f'ls_{orientation}_conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LINESCANNER_CHANNELS, kernel_size=kernel, stride=kernel, padding='valid', bias=False)),
+                (f'ls_{orientation}_norm', nn.BatchNorm2d(CONV_LINESCANNER_CHANNELS)),
+                (f'ls_{orientation}_relu', nn.ReLU()),
+                (f'ls_{orientation}_pool', nn.AdaptiveMaxPool2d(max_transformer))
+            ]))
+            return sequence
+            
         def addLinearLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
             sequence = nn.Sequential(OrderedDict([
                 (f'lin1_from{in_features}_to{self.hidden_sizes[0]}', layerType(in_features=in_features, out_features=self.hidden_sizes[0])),
@@ -264,14 +285,21 @@ def run():
             # Image
             # Image | Convolutional layers based on image
             img_intermediate_values = self.layer_conv_img(features.image)
-            row_conv_values = self.layer_avg_row(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)
-            col_conv_values = self.layer_avg_col(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)
+            row_conv_values = self.layer_conv_avg_row(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)
+            col_conv_values = self.layer_conv_avg_col(img_intermediate_values).view(1, -1, CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)
 
             # Row
-            # Row | Gather input
+            # Row | Global features
+            row_inputs_global = features.row_global
+
+            # Row | Linescanner
+            row_linescanner_values = self.layer_ls_row(features.image)
+            row_linescanner_top5 = torch.topk(row_linescanner_values, k=CONV_LINESCANNER_KEEPTOPX, dim=2, sorted=True).values.view(1, -1, CONV_LINESCANNER_KEEPTOPX*CONV_LINESCANNER_CHANNELS).broadcast_to((-1, features.image.shape[2], -1))
+            
+            # Row | Gather features
             row_inputs = torch.cat([features.row, row_conv_values], dim=-1)
             row_inputs_lag_leads = torch.cat([torch.roll(row_inputs, shifts=shift, dims=1) for shift in LAG_LEAD_STRUCTURE], dim=-1)     # dangerous if no padding applied !!!          
-            row_inputs_complete = torch.cat([row_inputs, row_inputs_lag_leads], dim=-1)
+            row_inputs_complete = torch.cat([row_inputs, row_inputs_lag_leads, row_inputs_global, row_linescanner_top5], dim=-1)
             
             # Row | Linear prediction
             row_direct_preds = self.layer_linear_row(row_inputs_complete)
@@ -282,10 +310,17 @@ def run():
             row_preds = self.layer_conv_preds_fc_row(torch.cat([row_direct_preds, row_conv_preds], dim=-1))
 
             # Col
-            # Col | Gather input
+            # Col | Global features
+            col_inputs_global = features.col_global
+
+            # Col | Linescanner
+            col_linescanner_values = self.layer_ls_col(features.image)
+            col_linescanner_top5 = torch.topk(col_linescanner_values, k=CONV_LINESCANNER_KEEPTOPX, dim=2, sorted=True).values.view(1, -1, CONV_LINESCANNER_KEEPTOPX*CONV_LINESCANNER_CHANNELS).broadcast_to((-1, features.image.shape[3], -1))
+
+            # Col | Gather features
             col_inputs = torch.cat([features.col, col_conv_values], dim=-1)
             col_inputs_lag_leads = torch.cat([torch.roll(col_inputs, shifts=shift, dims=1) for shift in LAG_LEAD_STRUCTURE], dim=-1)     # dangerous if no padding applied !!!
-            col_inputs_complete = torch.cat([col_inputs, col_inputs_lag_leads], dim=-1)
+            col_inputs_complete = torch.cat([col_inputs, col_inputs_lag_leads, col_inputs_global, col_linescanner_top5], dim=-1)
 
             # Col | Linear prediction
             col_direct_preds = self.layer_linear_col(col_inputs_complete)
@@ -302,7 +337,6 @@ def run():
             # Output
             return Output(row=row_probs, col=col_probs)
 
-    writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
     model = TabliterModel(hidden_sizes=HIDDEN_SIZES).to(DEVICE)
 
     # Loss function
@@ -420,6 +454,7 @@ def run():
         replaceDirs(pathData / 'val_annotated')  
         pathModel = pathModels / RUN_NAME
         os.makedirs(pathModel, exist_ok=True)
+        writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
 
         # Describe model
         # Model description | Graph
@@ -430,6 +465,8 @@ def run():
         # Model description | Count parameters
         def count_parameters(model):
             table = PrettyTable(["Modules", "Parameters"])
+            table.align['Modules'] = 'l'
+            table.align['Parameters'] = 'r'
             total_params = 0
             for name, parameter in model.named_parameters():
                 if not parameter.requires_grad: continue
@@ -474,12 +511,13 @@ def run():
         writer.add_hparams(hparam_dict={'epochs': EPOCHS,
                                         'batch_size': BATCH_SIZE,
                                         'max_lr': MAX_LR},
-                        metric_dict={'val_loss': val_loss.sum().item()/len(dataloader_val)})
+                        metric_dict={'val_loss': best_val_loss.sum().item()/len(dataloader_val)})
         writer.close()
         timers['train'] = perf_counter() - start_train
 
     if TASKS['eval']:
-        pathModelDict = PATH_ROOT / 'models' / BEST_RUN / 'best.pt'
+        modelRun = BEST_RUN or RUN_NAME
+        pathModelDict = PATH_ROOT / 'models' / modelRun / 'best.pt'
         model.load_state_dict(torch.load(pathModelDict))
         model.eval()
 
@@ -599,6 +637,7 @@ def run():
         timers['eval'] = perf_counter() - start_eval
 
     if TASKS['postprocess']:
+        print(''*4, 'Post-processing', ''*4)
         def preds_to_separators(predArray, paddingSeparator, threshold=0.8, setToMidpoint=False):
             # Tensor > np.array on cpu
             if isinstance(predArray, torch.Tensor):
@@ -618,7 +657,10 @@ def run():
 
             return separators
         def get_first_non_null_values(df):
-            return df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].fillna('empty').values.squeeze()
+            header_candidates = df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].fillna('empty').values.squeeze()
+            if header_candidates.shape == ():
+                header_candidates = np.expand_dims(header_candidates, 0)
+            return header_candidates
         def number_duplicates(l):
             counter = Counter()
 
@@ -639,7 +681,8 @@ def run():
             return cell
         
         # Load model
-        pathModel = PATH_ROOT / 'models' / BEST_RUN
+        modelRun = BEST_RUN or RUN_NAME
+        pathModel = PATH_ROOT / 'models' / modelRun
         pathModelDict =  pathModel / 'best.pt'
         model.load_state_dict(torch.load(pathModelDict))
         model.eval()
@@ -659,7 +702,7 @@ def run():
         # Padding separator
         paddingSeparator = np.array([[0, 40]])
         TableRect = namedtuple('tableRect', field_names=['x0', 'x1', 'y0', 'y1'])
-        FONT_TEXT = ImageFont.truetype('arial.ttf', size=24)
+        FONT_TEXT = ImageFont.truetype('arial.ttf', size=26)
         FONT_BIG = ImageFont.truetype('arial.ttf', size=48)
 
         with torch.no_grad():
@@ -725,7 +768,7 @@ def run():
                         for cell in cells:
                             textList = reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=1)
                             if textList:
-                                textList_sorted = sorted(textList, key=lambda el: (el[0][0][1]//10, el[0][0][0]))       # round height to the lowest ten to avoid height mismatch from fucking things up
+                                textList_sorted = sorted(textList, key=lambda el: (el[0][0][1]//15, el[0][0][0]))       # round height to the lowest X to avoid height mismatch from fucking things up
                                 cell['text'] = ' '.join([el[1] for el in textList_sorted])
                             else:
                                 cell['text'] = ''
@@ -749,48 +792,49 @@ def run():
                     df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
                     df = df.dropna(axis='columns', how='all').dropna(axis='index', how='all').reset_index(drop=True)
 
-                    # Data | Clean
-                    # Data | Clean | Combine "(" ")" columns
-                    uniques = {col: set(df[col].unique()) for col in df.columns}
-                    onlyParenthesis_open =  [col for col, unique in uniques.items() if unique == set([pd.NA, '('])]
-                    onlyParenthesis_close = [col for col, unique in uniques.items() if unique == set([pd.NA, ')'])]
+                    if len(df):
+                        # Data | Clean
+                        # Data | Clean | Combine "(" ")" columns
+                        uniques = {col: set(df[col].unique()) for col in df.columns}
+                        onlyParenthesis_open =  [col for col, unique in uniques.items() if unique == set([pd.NA, '('])]
+                        onlyParenthesis_close = [col for col, unique in uniques.items() if unique == set([pd.NA, ')'])]
 
-                    for col in onlyParenthesis_open:
-                        parenthesis_colIndex = df.columns.tolist().index(col)
-                        if parenthesis_colIndex == (len(df.columns) - 1):           # Drop if last column only contains (
-                            df = df.drop(columns=[col])
-                        else:                                                       # Otherwise add to next column
-                            target_col = df.columns[parenthesis_colIndex+1]
-                            df[target_col] = df[target_col] + df[col]               
-                    for col in onlyParenthesis_close:
-                        parenthesis_colIndex = df.columns.tolist().index(col)
-                        if parenthesis_colIndex == 0:                               # Drop if first column only contains )
-                            df = df.drop(columns=[col])
-                        else:                                                       # Otherwise add to previous column
-                            target_col = df.columns[parenthesis_colIndex-1]
-                            df[target_col] = df[target_col] + df[col]               
-                            df = df.drop(columns=[col])
+                        for col in onlyParenthesis_open:
+                            parenthesis_colIndex = df.columns.tolist().index(col)
+                            if parenthesis_colIndex == (len(df.columns) - 1):           # Drop if last column only contains (
+                                df = df.drop(columns=[col])
+                            else:                                                       # Otherwise add to next column
+                                target_col = df.columns[parenthesis_colIndex+1]
+                                df[target_col] = df[target_col] + df[col]               
+                        for col in onlyParenthesis_close:
+                            parenthesis_colIndex = df.columns.tolist().index(col)
+                            if parenthesis_colIndex == 0:                               # Drop if first column only contains )
+                                df = df.drop(columns=[col])
+                            else:                                                       # Otherwise add to previous column
+                                target_col = df.columns[parenthesis_colIndex-1]
+                                df[target_col] = df[target_col] + df[col]               
+                                df = df.drop(columns=[col])
 
-                    # Data | Clean | If last column only contains 1 or |, it is probably an OCR error
-                    ocr_mistakes_verticalLine = set([pd.NA, '1', '|'])
-                    if len(set(df.iloc[:, -1].unique()).difference(ocr_mistakes_verticalLine)) == 0:
-                        df = df.drop(df.columns[-1],axis=1)
+                        # Data | Clean | If last column only contains 1 or |, it is probably an OCR error
+                        ocr_mistakes_verticalLine = set([pd.NA, '1', '|'])
+                        if len(set(df.iloc[:, -1].unique()).difference(ocr_mistakes_verticalLine)) == 0:
+                            df = df.drop(df.columns[-1],axis=1)
 
-                    # Data | Clean | Column names
-                    # Data | Clean | Column names | First column is probably label column (if longest string in columns)
-                    longestStringLengths = {col: df.loc[1:, col].str.len().max() for col in df.columns}
-                    longestString = max(longestStringLengths, key=longestStringLengths.get)
-                    if longestString == 0:
-                        df.loc[0, longestString] = 'Labels'
+                        # Data | Clean | Column names
+                        # Data | Clean | Column names | First column is probably label column (if longest string in columns)
+                        longestStringLengths = {col: df.loc[1:, col].str.len().max() for col in df.columns}
+                        longestString = max(longestStringLengths, key=longestStringLengths.get)
+                        if longestString == 0:
+                            df.loc[0, longestString] = 'Labels'
 
-                    # Data | Clean | Column names | Replace column names by first non missing element in first five rows
-                    df.columns = get_first_non_null_values(df)
-                    df.columns = list(number_duplicates(df.columns))
-                    df = df.drop(index=0).reset_index(drop=True)
-                    
-                    # Data | Clean | Drop rows with only label and code information
-                    valueColumns = [col for col in df.columns if (col is pd.NA) or ((col not in ['Labels']) and not (col.startswith('Codes')))]
-                    df = df.dropna(axis='index', subset=valueColumns, how='all').reset_index(drop=True)
+                        # Data | Clean | Column names | Replace column names by first non missing element in first five rows
+                        df.columns = get_first_non_null_values(df)
+                        df.columns = list(number_duplicates(df.columns))
+                        df = df.drop(index=0).reset_index(drop=True)
+                        
+                        # Data | Clean | Drop rows with only label and code information
+                        valueColumns = [col for col in df.columns if (col is pd.NA) or ((col not in ['Labels']) and not (col.startswith('Codes')))]
+                        df = df.dropna(axis='index', subset=valueColumns, how='all').reset_index(drop=True)
 
                     # Data | Save
                     df.to_parquet(outPath / f'{name_full}.pq')
@@ -802,9 +846,9 @@ def run():
                     for cell in cells:
                         img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill=COLOR_CELL, outline=COLOR_OUTLINE, width=2)
                         if cell['text']:
-                            img_annot.rectangle(xy=img_annot.textbbox((cell['x0'], cell['y0']), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 128))
+                            img_annot.rectangle(xy=img_annot.textbbox((cell['x0'], cell['y0']), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240), width=2)
                             img_annot.text(xy=(cell['x0'], cell['y0']), text=cell['text'], fill=(0, 0, 0, 180), anchor='la', font=FONT_TEXT,)
-                    img_annot.text(xy=(img.width // 2, img.height // 20 * 19), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 180), anchor='ld')
+                    img_annot.text(xy=(img.width // 2, img.height // 40 * 39), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 230), anchor='md')
                     
                     # Visualise | Save image
                     img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
