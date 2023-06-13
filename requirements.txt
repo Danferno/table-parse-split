@@ -1,5 +1,6 @@
 # python -m venv c:/virtualenvs/table-parse-split-venv
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# pip install torch-scatter -f https://data.pyg.org/whl/torch-2.0.0+cu118.html
 lxml
 pytesseract
 prettytable

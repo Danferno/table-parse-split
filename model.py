@@ -25,14 +25,16 @@ def run():
     from collections import Counter
     from tqdm import tqdm
     import fitz        # type: ignore
+    from torch_scatter import segment_csr
     
     # Constants
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
     SUFFIX = 'narrow'
     DATA_TYPE = 'real'
     PROFILE = False
-    TASKS = {'train': False, 'eval': False, 'postprocess':True}
-    BEST_RUN = '2023_06_09__15_01'
+    TASKS = {'train': False, 'eval': True, 'postprocess':False}
+    # BEST_RUN = '2023_06_09__15_01'
+    BEST_RUN = '2023_06_12__18_13'
     # BEST_RUN = None
 
     LOSS_TYPES = ['row', 'col']
@@ -48,7 +50,6 @@ def run():
     LUMINOSITY_FILLER = 255
 
     PADDING = 40
-    TRUTH_THRESHOLD = 0.6
     COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
     COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
 
@@ -75,6 +76,9 @@ def run():
 
     FEATURE_COUNT_ROW = (len(COMMON_VARIABLES + ROW_VARIABLES) + CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)*(len(LAG_LEAD_STRUCTURE) + 1) + len(COMMON_GLOBAL_VARIABLES) + CONV_LINESCANNER_CHANNELS*CONV_LINESCANNER_KEEPTOPX
     FEATURE_COUNT_COL = (len(COMMON_VARIABLES + COL_VARIABLES) + CONV_FINAL_CHANNELS*CONV_FINAL_AVG_COUNT)*(len(LAG_LEAD_STRUCTURE) + 1) + len(COMMON_GLOBAL_VARIABLES) + CONV_LINESCANNER_CHANNELS*CONV_LINESCANNER_KEEPTOPX
+
+    FEATURE_COUNT_ROW_SEPARATORS = len(COMMON_VARIABLES + ROW_VARIABLES) * 2 + len(COMMON_GLOBAL_VARIABLES)
+    FEATURE_COUNT_COL_SEPARATORS = len(COMMON_VARIABLES + COL_VARIABLES) * 2 + len(COMMON_GLOBAL_VARIABLES)
 
     # Derived constants
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -201,10 +205,17 @@ def run():
     start_model_definition = perf_counter()
     Output = namedtuple('output', LOSS_TYPES)
     class TabliterModel(nn.Module):
-        def __init__(self, hidden_sizes=[15,10], layer_depth=3):
+        def __init__(self,
+                     feature_count_row_separators:int, feature_count_col_separators:int,
+                     hidden_sizes_features=[15,10], hidden_sizes_separators=[20, 5],
+                     truth_threshold=0.8):
             super().__init__()
-            self.hidden_sizes = hidden_sizes
-            self.layer_depth = layer_depth
+            # Parameters
+            self.hidden_sizes_features = hidden_sizes_features
+            self.hidden_sizes_separators = hidden_sizes_separators
+            self.truth_threshold = truth_threshold
+            self.feature_count_row_separators = feature_count_row_separators
+            self.feature_count_col_separators = feature_count_col_separators
 
             # Line scanner
             self.layer_ls_row = self.addLineScanner(orientation='rows')
@@ -221,14 +232,22 @@ def run():
             self.layer_conv_avg_col = nn.AdaptiveAvgPool2d(output_size=(CONV_FINAL_AVG_COUNT, None))
 
             # Feature+Conv Neural Net
-            self.layer_linear_row = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_ROW, out_features=1, activation=nn.ReLU)
-            self.layer_linear_col = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_COL, out_features=1, activation=nn.ReLU)
+            self.layer_linear_row = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_ROW, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_features)
+            self.layer_linear_col = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_COL, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_features)
 
             # Convolution on predictions
             self.layer_conv_preds_row = self.addPredConvLayer()
             self.layer_conv_preds_col = self.addPredConvLayer()
-            self.layer_conv_preds_fc_row = self.addPredConvFullyConnectedLayer(in_features=CONV_PRED_CHANNELS+1)
-            self.layer_conv_preds_fc_col = self.addPredConvFullyConnectedLayer(in_features=CONV_PRED_CHANNELS+1)
+            self.layer_conv_preds_fc_row = self.addLinearLayer_depth2(in_features=CONV_PRED_CHANNELS+1)
+            self.layer_conv_preds_fc_col = self.addLinearLayer_depth2(in_features=CONV_PRED_CHANNELS+1)
+
+            # Separator evaluator
+            self.layer_separators_row = self.addLinearLayer(layerType=nn.Linear, in_features=self.feature_count_row_separators, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_separators)
+            self.layer_separators_col = self.addLinearLayer(layerType=nn.Linear, in_features=self.feature_count_col_separators, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_separators)
+
+            # Prediction scores
+            self.layer_pred_row = self.addLinearLayer_depth2(in_features=2, hidden_sizes=[2])
+            self.layer_pred_col = self.addLinearLayer_depth2(in_features=2, hidden_sizes=[2])
 
             # Logit model
             self.layer_logit = nn.Sigmoid()
@@ -244,15 +263,15 @@ def run():
             ]))
             return sequence
             
-        def addLinearLayer(self, layerType:nn.Module, in_features:int, out_features:int, activation=nn.PReLU):
+        def addLinearLayer(self, layerType:nn.Module, in_features:int, out_features:int, hidden_sizes, activation=nn.PReLU):
             sequence = nn.Sequential(OrderedDict([
-                (f'lin1_from{in_features}_to{self.hidden_sizes[0]}', layerType(in_features=in_features, out_features=self.hidden_sizes[0])),
+                (f'lin1_from{in_features}_to{hidden_sizes[0]}', layerType(in_features=in_features, out_features=hidden_sizes[0])),
                 (f'relu_1', activation()),
                 # ('norm_lin1', nn.BatchNorm1d(self.hidden_sizes[0])),
-                (f'lin2_from{self.hidden_sizes[0]}_to{self.hidden_sizes[1]}', layerType(in_features=self.hidden_sizes[0], out_features=self.hidden_sizes[1])),
+                (f'lin2_from{hidden_sizes[0]}_to{hidden_sizes[1]}', layerType(in_features=hidden_sizes[0], out_features=hidden_sizes[1])),
                 (f'relu_2', activation()),
                 # ('norm_lin2', nn.BatchNorm1d(self.hidden_sizes[1])),
-                (f'lin3_from{self.hidden_sizes[1]}_to{out_features}', layerType(in_features=self.hidden_sizes[1], out_features=out_features))
+                (f'lin3_from{hidden_sizes[1]}_to{out_features}', layerType(in_features=hidden_sizes[1], out_features=out_features))
             ]))
             return sequence
             
@@ -266,7 +285,7 @@ def run():
                 ('predconv2_relu', nn.ReLU())
             ]))
             return sequence
-        def addPredConvFullyConnectedLayer(self, in_features:int, hidden_sizes=[6]):
+        def addLinearLayer_depth2(self, in_features:int, hidden_sizes=[6]):
             sequence = nn.Sequential(OrderedDict([
                 (f'lin1_from{in_features}_to{hidden_sizes[0]}', nn.Linear(in_features=in_features, out_features=hidden_sizes[0])),
                 (f'relu_1', nn.ReLU()),
@@ -274,6 +293,17 @@ def run():
             ]))
             return sequence
         
+        def preds_to_separators(self, predTensor, threshold):
+            # Apply threshold
+            is_separator = torch.cat([torch.full(size=(1,1), fill_value=0, device=DEVICE, dtype=torch.int8), torch.as_tensor(predTensor >= threshold, dtype=torch.int8).squeeze(-1)[:, 1:-1], torch.full(size=(1,1), fill_value=0, device=DEVICE, dtype=torch.int8)], dim=-1)
+            diff_in_separator_modus = torch.diff(is_separator, dim=-1)
+            separators_start = torch.where(diff_in_separator_modus == 1)
+            separators_end = torch.where(diff_in_separator_modus == -1)
+            separators = torch.stack([separators_start[1], separators_end[1]], axis=1).unsqueeze(0)     # not sure if this handles batches well
+
+            return separators
+
+       
         def forward(self, features):
             # Convert tuple to namedtuple
             if type(features) == type((0,)):
@@ -334,10 +364,57 @@ def run():
             row_probs = self.layer_logit(row_preds)
             col_probs = self.layer_logit(col_preds)
 
+            # Generate separator-specific features
+            row_separators = self.preds_to_separators(predTensor=row_probs, threshold=self.truth_threshold)     # this will fail for batches (unequal length of separators)
+            if row_separators.numel():
+                row_points = torch.cat([row_separators[:, 0, 0].unsqueeze(1), row_separators[:, :, 1]], dim=1)
+                row_min_per_separator = segment_csr(src=features.row, indptr=row_points, reduce='min')
+                row_max_per_separator = segment_csr(src=features.row, indptr=row_points, reduce='max')
+                row_separator_features = torch.cat([row_min_per_separator, row_max_per_separator,
+                                                    row_inputs_global[:, :row_separators.shape[1], :]], dim=-1)
+                row_separator_scores = self.layer_separators_row(row_separator_features)
+
+                row_separators_scores_broadcast = row_preds
+                start_indices = row_separators[:, :, 0]
+                end_indices = row_separators[:, :, 1]
+                for i in range(row_separators.shape[1]):
+                    row_separators_scores_broadcast[:, start_indices[:, i]:end_indices[:, i], :] = row_separator_scores[:, i, :]
+
+            else:
+                row_separators_scores_broadcast = row_preds
+
+            col_separators = self.preds_to_separators(predTensor=col_probs, threshold=self.truth_threshold)
+            if col_separators.numel():               
+                col_points = torch.cat([col_separators[:, 0, 0].unsqueeze(1), col_separators[:, :, 1]], dim=1)           
+                col_min_per_separator = segment_csr(src=features.col, indptr=col_points, reduce='min')               
+                col_max_per_separator = segment_csr(src=features.col, indptr=col_points, reduce='max')
+                col_separator_features = torch.cat([col_min_per_separator, col_max_per_separator,
+                                                    col_inputs_global[:, :col_separators.shape[1], :]], dim=-1)
+                col_separator_scores = self.layer_separators_col(col_separator_features)
+
+                col_separators_scores_broadcast = col_preds
+                start_indices = col_separators[:, :, 0]
+                end_indices = col_separators[:, :, 1]
+                for i in range(col_separators.shape[1]):
+                    col_separators_scores_broadcast[:, start_indices[:, i]:end_indices[:, i], :] = col_separator_scores[:, i, :]
+            else:
+                col_separators_scores_broadcast = col_preds
+
+            # Evaluate separators
+            row_prob_features = torch.cat([row_preds, row_separators_scores_broadcast], dim=-1)
+            col_prob_features = torch.cat([col_preds, col_separators_scores_broadcast], dim=-1)
+            
+            row_prob_scores = self.layer_pred_row(row_prob_features)
+            col_prob_scores = self.layer_pred_col(col_prob_features)
+
+            # Turn into probabilities
+            row_probs = self.layer_logit(row_prob_scores)
+            col_probs = self.layer_logit(col_prob_scores)
+
             # Output
             return Output(row=row_probs, col=col_probs)
 
-    model = TabliterModel(hidden_sizes=HIDDEN_SIZES).to(DEVICE)
+    model = TabliterModel(hidden_sizes_features=HIDDEN_SIZES, feature_count_row_separators=FEATURE_COUNT_ROW_SEPARATORS,feature_count_col_separators=FEATURE_COUNT_COL_SEPARATORS).to(DEVICE)
 
     # Loss function
     # Loss function | Calculate target ratio to avoid dominant focus
@@ -511,7 +588,7 @@ def run():
         writer.add_hparams(hparam_dict={'epochs': EPOCHS,
                                         'batch_size': BATCH_SIZE,
                                         'max_lr': MAX_LR},
-                        metric_dict={'val_loss': best_val_loss.sum().item()/len(dataloader_val)})
+                        metric_dict={'val_loss': best_val_loss.sum().item()})
         writer.close()
         timers['train'] = perf_counter() - start_train
 
