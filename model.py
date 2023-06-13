@@ -207,6 +207,8 @@ def run():
     class TabliterModel(nn.Module):
         def __init__(self,
                      feature_count_row_separators:int, feature_count_col_separators:int,
+                     image_convolution_parameters={'channels_1': 2, 'size_1': (4, 4), 'pool_count_1': 4},
+                     preds_convolution_parameters={'channels_1': 3, 'channels_2': 3, 'size_1': (4), 'size_2': (10)},
                      hidden_sizes_features=[15,10], hidden_sizes_separators=[20, 5],
                      truth_threshold=0.8):
             super().__init__()
@@ -216,6 +218,8 @@ def run():
             self.truth_threshold = truth_threshold
             self.feature_count_row_separators = feature_count_row_separators
             self.feature_count_col_separators = feature_count_col_separators
+            self.image_convolution_parameters = image_convolution_parameters
+            self.preds_convolution_parameters = preds_convolution_parameters
 
             # Line scanner
             self.layer_ls_row = self.addLineScanner(orientation='rows')
@@ -223,13 +227,13 @@ def run():
 
             # Convolution on image
             self.layer_conv_img = nn.Sequential(OrderedDict([
-                ('conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LETTER_CHANNELS, kernel_size=CONV_LETTER_KERNEL, padding='same', padding_mode='replicate', bias=False)),
-                ('norm_conv1', nn.BatchNorm2d(CONV_LETTER_CHANNELS)),
+                ('conv1', nn.Conv2d(in_channels=1, out_channels=self.image_convolution_parameters['channels_1'], kernel_size=self.image_convolution_parameters['size_1'], padding='same', padding_mode='replicate', bias=False)),
+                ('norm_conv1', nn.BatchNorm2d(self.image_convolution_parameters['channels_1'])),
                 ('relu1', nn.ReLU()),
                 # ('conv2', nn.Conv2d(in_channels=5, out_channels=2, kernel_size=CONV_SEQUENCE_KERNEL, padding='same', padding_mode='replicate')),
             ]))
-            self.layer_conv_avg_row = nn.AdaptiveAvgPool2d(output_size=(None, CONV_FINAL_AVG_COUNT))
-            self.layer_conv_avg_col = nn.AdaptiveAvgPool2d(output_size=(CONV_FINAL_AVG_COUNT, None))
+            self.layer_conv_avg_row = nn.AdaptiveAvgPool2d(output_size=(None, self.image_convolution_parameters['pool_count_1']))
+            self.layer_conv_avg_col = nn.AdaptiveAvgPool2d(output_size=(self.image_convolution_parameters['pool_count_1'], None))
 
             # Feature+Conv Neural Net
             self.layer_linear_row = self.addLinearLayer(layerType=nn.Linear, in_features=FEATURE_COUNT_ROW, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_features)
@@ -238,8 +242,8 @@ def run():
             # Convolution on predictions
             self.layer_conv_preds_row = self.addPredConvLayer()
             self.layer_conv_preds_col = self.addPredConvLayer()
-            self.layer_conv_preds_fc_row = self.addLinearLayer_depth2(in_features=CONV_PRED_CHANNELS+1)
-            self.layer_conv_preds_fc_col = self.addLinearLayer_depth2(in_features=CONV_PRED_CHANNELS+1)
+            self.layer_conv_preds_fc_row = self.addLinearLayer_depth2(in_features=self.preds_convolution_parameters['channels_2']+1)
+            self.layer_conv_preds_fc_col = self.addLinearLayer_depth2(in_features=self.preds_convolution_parameters['channels_2']+1)
 
             # Separator evaluator
             self.layer_separators_row = self.addLinearLayer(layerType=nn.Linear, in_features=self.feature_count_row_separators, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_separators)
@@ -277,11 +281,11 @@ def run():
             
         def addPredConvLayer(self):
             sequence = nn.Sequential(OrderedDict([
-                ('predconv1', nn.Conv1d(in_channels=1, out_channels=CONV_PRED_CHANNELS, kernel_size=CONV_PRED_WINDOWS[0], padding='same', padding_mode='replicate', bias=False)),
-                ('predconv1_norm', nn.BatchNorm1d(CONV_PRED_CHANNELS)),
+                ('predconv1', nn.Conv1d(in_channels=1, out_channels=self.preds_convolution_parameters['channels_1'], kernel_size=self.preds_convolution_parameters['size_1'], padding='same', padding_mode='replicate', bias=False)),
+                ('predconv1_norm', nn.BatchNorm1d(self.preds_convolution_parameters['channels_1'])),
                 ('predconv1_relu', nn.ReLU()),
-                ('predconv2', nn.Conv1d(in_channels=CONV_PRED_CHANNELS, out_channels=CONV_PRED_CHANNELS, kernel_size=CONV_PRED_WINDOWS[1], padding='same', padding_mode='replicate', bias=False)),
-                ('predconv2_norm', nn.BatchNorm1d(CONV_PRED_CHANNELS)),
+                ('predconv2', nn.Conv1d(in_channels=self.preds_convolution_parameters['channels_1'], out_channels=self.preds_convolution_parameters['channels_2'], kernel_size=self.preds_convolution_parameters['size_2'], padding='same', padding_mode='replicate', bias=False)),
+                ('predconv2_norm', nn.BatchNorm1d(self.preds_convolution_parameters['channels_2'])),
                 ('predconv2_relu', nn.ReLU())
             ]))
             return sequence
@@ -336,7 +340,7 @@ def run():
             # row_preds = row_direct_preds      # uncomment for linear prediction
 
             # Row | Convolved prediction
-            row_conv_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, CONV_PRED_CHANNELS)
+            row_conv_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, self.preds_convolution_parameters['channels_1'])
             row_preds = self.layer_conv_preds_fc_row(torch.cat([row_direct_preds, row_conv_preds], dim=-1))
 
             # Col
@@ -357,7 +361,7 @@ def run():
             # col_preds = col_direct_preds         # uncomment for linear prediction
 
             # Col | Convolved prediction
-            col_conv_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, CONV_PRED_CHANNELS)
+            col_conv_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, self.preds_convolution_parameters['channels_1'])
             col_preds = self.layer_conv_preds_fc_col(torch.cat([col_direct_preds, col_conv_preds], dim=-1))
            
             # Turn into probabilities
@@ -414,7 +418,9 @@ def run():
             # Output
             return Output(row=row_probs, col=col_probs)
 
-    model = TabliterModel(hidden_sizes_features=HIDDEN_SIZES, feature_count_row_separators=FEATURE_COUNT_ROW_SEPARATORS,feature_count_col_separators=FEATURE_COUNT_COL_SEPARATORS).to(DEVICE)
+    model = TabliterModel(hidden_sizes_features=HIDDEN_SIZES, feature_count_row_separators=FEATURE_COUNT_ROW_SEPARATORS,feature_count_col_separators=FEATURE_COUNT_COL_SEPARATORS,
+                          image_convolution_parameters={'channels_1': CONV_LETTER_CHANNELS, 'size_1': CONV_LETTER_KERNEL, 'pool_count_1': CONV_FINAL_AVG_COUNT},
+                          preds_convolution_parameters={'channels_1': CONV_PRED_CHANNELS, 'channels_2': CONV_PRED_CHANNELS, 'size_1': CONV_PRED_WINDOWS[0], 'size_2': CONV_PRED_WINDOWS[1]}).to(DEVICE)
 
     # Loss function
     # Loss function | Calculate target ratio to avoid dominant focus
