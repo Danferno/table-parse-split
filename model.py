@@ -32,13 +32,15 @@ def run():
     SUFFIX = 'narrow'
     DATA_TYPE = 'real'
     PROFILE = False
-    TASKS = {'train': False, 'eval': True, 'postprocess':False}
+    TASKS = {'train': True, 'eval': True, 'postprocess': True}
     # BEST_RUN = '2023_06_09__15_01'
-    BEST_RUN = '2023_06_12__18_13'
-    # BEST_RUN = None
+    # BEST_RUN = '2023_06_12__18_13'
+    BEST_RUN = None
 
-    LOSS_TYPES = ['row', 'col']
-    FEATURE_TYPES = LOSS_TYPES + ['image', 'row_global', 'col_global']
+    ORIENTATIONS = ['row', 'col']
+    LOSS_CHARACTERISTICS = ['line', 'separator_count']
+    LOSS_ELEMENTS = [f'{orientation}_{characteristic}' for orientation in ORIENTATIONS for characteristic in LOSS_CHARACTERISTICS]
+    FEATURE_TYPES = ORIENTATIONS + ['image', 'row_global', 'col_global']
 
     COMMON_VARIABLES = ['{}_avg', '{}_absDiff', '{}_spell_mean', '{}_spell_sd', '{}_wordsCrossed_count', '{}_wordsCrossed_relToMax']
     ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart']
@@ -54,7 +56,7 @@ def run():
     COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
 
     # Model parameters
-    EPOCHS = 150
+    EPOCHS = 50
     BATCH_SIZE = 1
     MAX_LR = 0.08
     HIDDEN_SIZES = [45, 15]
@@ -82,7 +84,7 @@ def run():
 
     # Derived constants
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    LOSS_TYPES_COUNT = len(LOSS_TYPES)
+    LOSS_ELEMENTS_COUNT = len(LOSS_ELEMENTS)
     RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
 
     # Paths
@@ -103,7 +105,7 @@ def run():
     start_data = perf_counter()
     Sample = namedtuple('sample', ['features', 'targets', 'meta'])
     Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model', 'image_angle'])
-    Targets = namedtuple('target', LOSS_TYPES)
+    Targets = namedtuple('target', LOSS_ELEMENTS)
     Features = namedtuple('features', FEATURE_TYPES)
 
     class TableDataset(Dataset):
@@ -155,8 +157,13 @@ def run():
             # Load sample | Label
             with open(pathLabel, 'r') as f:
                 labelData = json.load(f)
-            targets = Targets(row=Tensor(labelData['row']).unsqueeze(-1).to(DEVICE),
-                                            col=Tensor(labelData['col']).unsqueeze(-1).to(DEVICE))
+            row_targets = Tensor(labelData['row'])
+            col_targets = Tensor(labelData['col'])
+            row_separator_count = torch.tensor(torch.where(torch.diff(row_targets) == 1)[0].numel(), dtype=torch.int32)
+            col_separator_count = torch.tensor(torch.where(torch.diff(col_targets) == 1)[0].numel(), dtype=torch.int32)
+            
+            targets = Targets(row_line=row_targets.unsqueeze(-1).to(DEVICE), row_separator_count = row_separator_count.to(DEVICE),
+                              col_line=col_targets.unsqueeze(-1).to(DEVICE), col_separator_count = col_separator_count.to(DEVICE))
         
             # Load sample | Features
             with open(pathFeatures, 'r') as f:
@@ -203,7 +210,7 @@ def run():
 
     # Model
     start_model_definition = perf_counter()
-    Output = namedtuple('output', LOSS_TYPES)
+    Output = namedtuple('output', ORIENTATIONS)
     class TabliterModel(nn.Module):
         def __init__(self,
                      feature_count_row_separators:int, feature_count_col_separators:int,
@@ -434,8 +441,8 @@ def run():
         classWeights = classWeights / classWeights.sum()
         return classWeights
 
-    targets_row = [(sample.targets.row.sum().item(), sample.targets.row.shape[0]) for sample in iter(dataset_train)]
-    targets_col = [(sample.targets.col.sum().item(), sample.targets.col.shape[0]) for sample in iter(dataset_train)]
+    targets_row = [(sample.targets.row_line.sum().item(), sample.targets.row_line.shape[0]) for sample in iter(dataset_train)]
+    targets_col = [(sample.targets.col_line.sum().item(), sample.targets.col_line.shape[0]) for sample in iter(dataset_train)]
     classWeights = {'row': calculateWeights(targets=targets_row),
                     'col': calculateWeights(targets=targets_col)}
 
@@ -457,19 +464,36 @@ def run():
             return torch.neg(torch.mean(loss))
 
     def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False):   
-        loss = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.float32)
-        correct, maxCorrect = torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.empty(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
+        loss = torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.float32)
+        correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64)
 
-        for idx, lossType in enumerate(LOSS_TYPES):
-            target = targets[idx].to(DEVICE)
-            pred = preds[idx].to(DEVICE)
-            loss_fn = lossFunctions[lossType]
+        for idx_orientation, _ in enumerate(ORIENTATIONS):     # idx = 0; orientation = ORIENTATIONS[idx]
+            # Line
+            idx_line = 2*idx_orientation
+            target_line = targets[idx_line].to(DEVICE)
+            pred_line = preds[idx_orientation].to(DEVICE)
 
-            loss[idx] = loss_fn(pred, target)
+            loss_element = LOSS_ELEMENTS[idx_line]
+            loss_fn = lossFunctions[loss_element]
+            loss[idx_line] = loss_fn(pred_line, target_line)
 
             if calculateCorrect:
-                correct[idx] = ((pred >= 0.5) == target).sum().item()
-                maxCorrect[idx] = pred.numel()
+                correct[idx_line] = ((pred_line >= 0.5) == target_line).sum().item()
+                maxCorrect[idx_line] = pred_line.numel()
+
+            # Separator count
+            idx_count = 2*idx_orientation + 1
+            target_count = targets[idx_count].to(DEVICE)
+            pred_separators = torch.as_tensor(pred_line >= 0.5, dtype=torch.int8).squeeze(-1)
+            pred_count = torch.min(torch.tensor([torch.where(torch.diff(pred_separators) == 1)[0].numel(), torch.where(torch.diff(pred_separators) == -1)[0].numel()]))
+            
+            loss_element = LOSS_ELEMENTS[idx_count]
+            loss_fn = lossFunctions[loss_element]
+            loss[idx_count] = loss_fn(pred_count, target_count)
+
+            if calculateCorrect:
+                correct[idx_count] = pred_count.item()
+                maxCorrect[idx_count] = target_count.item()
         
         if calculateCorrect:
             return loss, correct, maxCorrect
@@ -479,8 +503,8 @@ def run():
     timers['model_definition'] = perf_counter() - start_model_definition
 
     # Train
-    lossFunctions = {'row': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
-                    'col': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
+    lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']), 'row_separator_count': nn.PoissonNLLLoss(log_input=False),
+                    'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': nn.PoissonNLLLoss(log_input=False)} 
     optimizer = torch.optim.SGD(model.parameters(), lr=MAX_LR)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=MAX_LR, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
 
@@ -513,7 +537,7 @@ def run():
 
     def val_loop(dataloader, model, lossFunctions):
         batchCount = len(dataloader)
-        val_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
+        val_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64)
         with torch.no_grad():
             for batch in dataloader:     # batch = next(iter(dataloader))
                 # Compute prediction and loss
@@ -527,24 +551,14 @@ def run():
         shareCorrect = correct / maxCorrect
 
         print(f'''Validation
-            Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
-            Avg val loss: {val_loss.sum().item():.3f} (total) | {val_loss[0].item():.3f} (row) | {val_loss[1].item():.3f} (col)''')
+            Accuracy line-level: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[2].item()):>0.1f}% (col)
+            Separator count (relative to truth): {(100*shareCorrect[1].item()):>0.1f}% (row) | {(100*shareCorrect[3].item()):>0.1f}% (col)
+            Avg val loss: {val_loss.sum().item():.3f} (total) | {val_loss[0].item():.3f} (row-line) | {val_loss[2].item():.3f} (col-line) | {val_loss[1].item():.3f} (row-separator) | {val_loss[3].item():.3f} (col-separator)''')
         
         return val_loss.sum()
 
     if TASKS['train']:
-        # Prepare folders
-        replaceDirs(pathData / 'val_annotated')  
-        pathModel = pathModels / RUN_NAME
-        os.makedirs(pathModel, exist_ok=True)
-        writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
-
         # Describe model
-        # Model description | Graph
-        sample = next(iter(dataloader_train))
-        y = model(sample.features)
-        make_dot(y, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(pathLogs / 'graph', format='png')
-
         # Model description | Count parameters
         def count_parameters(model):
             table = PrettyTable(["Modules", "Parameters"])
@@ -562,8 +576,11 @@ def run():
         print(model)
         count_parameters(model=model)
 
-        # Model description | Tensorboard
-        writer.add_graph(model, input_to_model=[sample.features])
+
+        # Prepare folders
+        pathModel = pathModels / RUN_NAME
+        os.makedirs(pathModel, exist_ok=True)
+        writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
         
         start_train = perf_counter()
         with torch.autograd.profiler.profile(enabled=PROFILE) as prof:
@@ -590,12 +607,15 @@ def run():
             print(dataset_train.__getitem__.cache_info())
             print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
-        # Close tensorboard writer
+        # Finish model description
+        sample = next(iter(dataloader_train))
+        writer.add_graph(model, input_to_model=[sample.features])
         writer.add_hparams(hparam_dict={'epochs': EPOCHS,
                                         'batch_size': BATCH_SIZE,
                                         'max_lr': MAX_LR},
                         metric_dict={'val_loss': best_val_loss.sum().item()})
         writer.close()
+
         timers['train'] = perf_counter() - start_train
 
     if TASKS['eval']:
@@ -603,6 +623,10 @@ def run():
         pathModelDict = PATH_ROOT / 'models' / modelRun / 'best.pt'
         model.load_state_dict(torch.load(pathModelDict))
         model.eval()
+
+        # Prepare folders
+        path_annotations_raw_val = pathModel / 'val_annotated'
+        replaceDirs(path_annotations_raw_val)  
 
         # Predict
         start_eval = perf_counter()
@@ -615,7 +639,7 @@ def run():
 
         def eval_loop(dataloader, model, lossFunctions, outPath=None):
             batchCount = len(dataloader)
-            eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_TYPES_COUNT,1), device=DEVICE, dtype=torch.int64)
+            eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64)
             with torch.no_grad():
                 for batchNumber, batch in enumerate(dataloader):
                     # Compute prediction and loss
@@ -638,8 +662,8 @@ def run():
                             
                             # Sample data | Ground truth
                             gt = {}
-                            gt['row'] = batch.targets.row[sampleNumber].squeeze().cpu().numpy()
-                            gt['col'] = batch.targets.col[sampleNumber].squeeze().cpu().numpy()
+                            gt['row'] = batch.targets.row_line[sampleNumber].squeeze().cpu().numpy()
+                            gt['col'] = batch.targets.col_line[sampleNumber].squeeze().cpu().numpy()
 
                             predictions = {}
                             predictions['row'] = preds.row[sampleNumber].squeeze().cpu().numpy()
@@ -708,15 +732,16 @@ def run():
             eval_loss = eval_loss / batchCount
             shareCorrect = correct / maxCorrect
 
-            print(f'''Validation
-                Accuracy: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[1].item()):>0.1f}% (col)
-                Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row) | {eval_loss[1].item():.3f} (col)''')
+            print(f'''Evaluation on best model
+                Accuracy line-level: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[2].item()):>0.1f}% (col)
+                Separator count (relative to truth): {(100*shareCorrect[1].item()):>0.1f}% (row) | {(100*shareCorrect[3].item()):>0.1f}% (col)
+                Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row-line) | {eval_loss[2].item():.3f} (col-line) | {eval_loss[1].item():.3f} (row-separator) | {eval_loss[3].item():.3f} (col-separator)''')
             
             if outPath:
                 return outPath
 
         # Visualize results
-        eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=pathData / 'val_annotated')
+        eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=path_annotations_raw_val)
         timers['eval'] = perf_counter() - start_eval
 
     if TASKS['postprocess']:
