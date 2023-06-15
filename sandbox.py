@@ -16,7 +16,6 @@ def run():
     from torch.utils.tensorboard import SummaryWriter
     from datetime import datetime
     from time import perf_counter
-    from functools import cache
     from PIL import Image, ImageDraw, ImageFont
     import pandas as pd
     import easyocr
@@ -27,16 +26,14 @@ def run():
     from model import TabliterModel, LOSS_ELEMENTS_COUNT
     from loss import WeightedBinaryCrossEntropyLoss, LogisticLoss, getLossFunctions, calculateLoss
     from dataloader import get_dataloader
+    from train import train
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
     RUN_NAME = 'test'
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-    SUFFIX = 'narrow'
-    DATA_TYPE = 'real'
-    PROFILE = False
-    TASKS = {'train': True, 'eval': True, 'postprocess': True}
+    TASKS = {'train': True, 'eval': False, 'postprocess': False}
     # BEST_RUN = '2023_06_09__15_01'
     # BEST_RUN = '2023_06_12__18_13'
     BEST_RUN = None  
@@ -64,77 +61,14 @@ def run():
         except FileExistsError:
             shutil.rmtree(path)
             os.makedirs(path)
-    pathData = PATH_ROOT / 'data' / f'{DATA_TYPE}_{SUFFIX}'
-    pathLogs = PATH_ROOT / 'torchlogs'
-    pathModels = PATH_ROOT / 'models'
+    path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
+    path_model = Path(r"F:\ml-parsing-project\table-parse-split\models") / 'sandbox_model'
 
     # Timing
     timers = {}
 
-    # Data   
-    dataloader_train = get_dataloader(dir_data=pathData / 'train', shuffle=True)
-    dataloader_val = get_dataloader(dir_data=pathData / 'val', shuffle=False)
-    dataloader_test = get_dataloader(dir_data=pathData / 'test', shuffle=False)
-
     # Define model
     model = TabliterModel().to(DEVICE)
-
-    # Loss function
-    # Loss function | Calculate target ratio to avoid dominant focus
-
-    # Train
-    lossFunctions = getLossFunctions(dataloader=dataloader_train)
-    optimizer = torch.optim.SGD(model.parameters(), lr=MAX_LR)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=MAX_LR, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
-
-    def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4, device='cuda'):
-        print('Train')
-        start = perf_counter()
-        size = len(dataloader.dataset)
-        batch_size = dataloader.batch_size
-        epoch_loss = 0
-        for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
-            # Compute prediction and loss
-            preds = model(batch.features)
-            loss = calculateLoss(batch.targets, preds, lossFunctions, device=device)
-            epoch_loss += loss
-            
-            # Backpropagation
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            scheduler.step()
-
-            # Report intermediate losses
-            report_batch_size = (size / batch_size) // report_frequency
-            if (batchNumber+1) % report_batch_size == 0:
-                epoch_loss, current = epoch_loss.item(), (batchNumber+1) * batch_size
-                print(f'\tAvg epoch loss: {epoch_loss/current:.3f} [{current:>5d}/{size:>5d}]')
-        
-        print(f'\tEpoch duration: {perf_counter()-start:.0f}s')
-        return epoch_loss / len(dataloader)
-
-    def val_loop(dataloader, model, lossFunctions, device='cuda'):
-        batchCount = len(dataloader)
-        val_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64)
-        with torch.no_grad():
-            for batch in dataloader:     # batch = next(iter(dataloader))
-                # Compute prediction and loss
-                preds = model(batch.features)
-                val_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
-                val_loss += val_loss_batch
-                correct  += correct_batch
-                maxCorrect  += maxCorrect_batch
-
-        val_loss = val_loss / batchCount
-        shareCorrect = correct / maxCorrect
-
-        print(f'''Validation
-            Accuracy line-level: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[2].item()):>0.1f}% (col)
-            Separator count (relative to truth): {(100*shareCorrect[1].item()):>0.1f}% (row) | {(100*shareCorrect[3].item()):>0.1f}% (col)
-            Avg val loss: {val_loss.sum().item():.3f} (total) | {val_loss[0].item():.3f} (row-line) | {val_loss[2].item():.3f} (col-line) | {val_loss[1].item():.3f} (row-separator) | {val_loss[3].item():.3f} (col-separator)''')
-        
-        return val_loss
 
     if TASKS['train']:
         # Describe model
@@ -153,54 +87,18 @@ def run():
             print(f"Total Trainable Params: {total_params}")
             return total_params
         print(model)
-        count_parameters(model=model)
+        count_parameters(model=model)      
 
-
-        # Prepare folders
-        pathModel = pathModels / RUN_NAME
-        os.makedirs(pathModel, exist_ok=True)
-        writer = SummaryWriter(f"torchlogs/{RUN_NAME}")
-        
-        start_train = perf_counter()
-        with torch.autograd.profiler.profile(enabled=PROFILE) as prof:
-            best_val_loss = 9e20
-            for epoch in range(EPOCHS):
-                learning_rate = scheduler.get_last_lr()[0]
-                print(f"\nEpoch {epoch+1} of {EPOCHS}. Learning rate: {learning_rate:03f}")
-                model.train()
-                train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4, device=DEVICE)
-                model.eval()
-                val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, device=DEVICE)
-
-                writer.add_scalar('Train/Loss', scalar_value=train_loss, global_step=epoch)
-                writer.add_scalar('Val/Loss/Total', scalar_value=val_loss.sum(), global_step=epoch)
-                writer.add_scalars('Val/Loss/Components', tag_scalar_dict={
-                    'row_line': val_loss[0],
-                    'row_separator_count': val_loss[1],
-                    'col_line': val_loss[2],
-                    'col_separator_count': val_loss[3]
-                }, global_step=epoch)
-                writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
-
-                if val_loss.sum() < best_val_loss:
-                    best_val_loss = val_loss.sum()
-                    torch.save(model.state_dict(), pathModel / 'best.pt')
-
-            torch.save(model.state_dict(), pathModel / f'last.pt')
-
-        if PROFILE:
-            print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+        # Train
+        best_val_loss, writer = train(epochs=EPOCHS,
+            path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model)
 
         # Finish model description
-        sample = next(iter(dataloader_train))
-        writer.add_graph(model, input_to_model=[sample.features])
         writer.add_hparams(hparam_dict={'epochs': EPOCHS,
                                         'batch_size': BATCH_SIZE,
                                         'max_lr': MAX_LR},
                         metric_dict={'val_loss': best_val_loss.sum().item()})
-        writer.close()
-
-        timers['train'] = perf_counter() - start_train
+        writer.close()       
 
     if TASKS['eval']:
         modelRun = BEST_RUN or RUN_NAME
@@ -208,8 +106,11 @@ def run():
         model.load_state_dict(torch.load(pathModelDict))
         model.eval()
 
+        dataloader_val = get_dataloader(dir_data=path_data / 'val')
+        lossFunctions = getLossFunctions(dataloader=get_dataloader(dir_data=path_data / 'train'))
+
         # Prepare folders
-        path_annotations_raw_val = pathModel / 'val_annotated'
+        path_annotations_raw_val = path_model / 'val_annotated'
         replaceDirs(path_annotations_raw_val)  
 
         # Predict
@@ -330,6 +231,7 @@ def run():
 
     if TASKS['postprocess']:
         print(''*4, 'Post-processing', ''*4)
+        dataloader_val = get_dataloader(dir_data=path_data / 'val')
         def preds_to_separators(predArray, paddingSeparator, threshold=0.8, setToMidpoint=False):
             # Tensor > np.array on cpu
             if isinstance(predArray, torch.Tensor):
@@ -548,11 +450,6 @@ def run():
                     # Visualise | Save image
                     img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
                     img.save(outPath / f'{name_full}.png')
-        
-
-    # Reporting timings
-    for key, value in timers.items():
-        print(f'{key}: {value:.1f}')
 
 if __name__ == '__main__':
     run()

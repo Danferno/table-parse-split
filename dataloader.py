@@ -13,8 +13,7 @@ from model import Meta, Sample, Features, Targets, COMMON_VARIABLES, COMMON_GLOB
 
 class TableDataset(Dataset):
     def __init__(self, dir_data,
-                    device='cuda', image_format='.png',
-                    transform_image=None, transform_target=None):
+                    device='cuda', image_format='.png'):
         # Store in self 
         dir_data = Path(dir_data)
         self.device = device
