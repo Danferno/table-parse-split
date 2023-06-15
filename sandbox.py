@@ -9,7 +9,6 @@ def run():
     from torchvision.io import read_image, ImageReadMode
     from torch.utils.data import Dataset, DataLoader
     from torch import Tensor
-    from prettytable import PrettyTable
     import cv2 as cv
     import numpy as np
     from collections import namedtuple, OrderedDict
@@ -27,6 +26,7 @@ def run():
     from loss import WeightedBinaryCrossEntropyLoss, LogisticLoss, getLossFunctions, calculateLoss
     from dataloader import get_dataloader
     from train import train
+    from describe import describe_model
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
@@ -47,7 +47,6 @@ def run():
 
     # Model parameters
     EPOCHS = 3
-    BATCH_SIZE = 1
     MAX_LR = 0.08
 
     # Derived constants
@@ -64,41 +63,16 @@ def run():
     path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
     path_model = Path(r"F:\ml-parsing-project\table-parse-split\models") / 'sandbox_model'
 
-    # Timing
-    timers = {}
-
     # Define model
     model = TabliterModel().to(DEVICE)
 
     if TASKS['train']:
         # Describe model
-        # Model description | Count parameters
-        def count_parameters(model):
-            table = PrettyTable(["Modules", "Parameters"])
-            table.align['Modules'] = 'l'
-            table.align['Parameters'] = 'r'
-            total_params = 0
-            for name, parameter in model.named_parameters():
-                if not parameter.requires_grad: continue
-                params = parameter.numel()
-                table.add_row([name, params])
-                total_params+=params
-            print(table)
-            print(f"Total Trainable Params: {total_params}")
-            return total_params
-        print(model)
-        count_parameters(model=model)      
+        describe_model(model)     
 
         # Train
-        best_val_loss, writer = train(epochs=EPOCHS,
+        train(epochs=EPOCHS, max_lr=MAX_LR,
             path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model)
-
-        # Finish model description
-        writer.add_hparams(hparam_dict={'epochs': EPOCHS,
-                                        'batch_size': BATCH_SIZE,
-                                        'max_lr': MAX_LR},
-                        metric_dict={'val_loss': best_val_loss.sum().item()})
-        writer.close()       
 
     if TASKS['eval']:
         modelRun = BEST_RUN or RUN_NAME
@@ -114,7 +88,6 @@ def run():
         replaceDirs(path_annotations_raw_val)  
 
         # Predict
-        start_eval = perf_counter()
         def convert_01_array_to_visual(array, invert=False, width=40) -> np.array:
             luminosity = (1 - array) * LUMINOSITY_GT_FEATURES_MAX if invert else array * LUMINOSITY_GT_FEATURES_MAX
             luminosity = luminosity.round(0).astype(np.uint8)
@@ -227,7 +200,6 @@ def run():
 
         # Visualize results
         eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=path_annotations_raw_val)
-        timers['eval'] = perf_counter() - start_eval
 
     if TASKS['postprocess']:
         print(''*4, 'Post-processing', ''*4)

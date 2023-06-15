@@ -122,10 +122,16 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
         if profile:
             print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
+        # Report
         train_duration = perf_counter() - start_train
         print(f'Trained for {train_duration/60:0.2f} minutes')
 
-        return best_val_loss, writer
+        # Add summary statistics to tensorboard
+        writer.add_hparams(hparam_dict={'epochs': epochs,
+                                'batch_size': dataloader_train.batch_size,
+                                'max_lr': max_lr},
+                metric_dict={'val_loss': best_val_loss.sum().item()})
+        writer.close()
 
 if __name__ == '__main__':
     path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
