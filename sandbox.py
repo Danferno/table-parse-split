@@ -3,18 +3,10 @@ def run():
     import shutil
     import os, sys
     from pathlib import Path
-    import json
     import torch
-    from torch import nn
-    from torchvision.io import read_image, ImageReadMode
-    from torch.utils.data import Dataset, DataLoader
-    from torch import Tensor
     import cv2 as cv
     import numpy as np
     from collections import namedtuple, OrderedDict
-    from torch.utils.tensorboard import SummaryWriter
-    from datetime import datetime
-    from time import perf_counter
     from PIL import Image, ImageDraw, ImageFont
     import pandas as pd
     import easyocr
@@ -22,10 +14,10 @@ def run():
     from tqdm import tqdm
     import fitz        # type: ignore
     
-    from model import TabliterModel, LOSS_ELEMENTS_COUNT
-    from loss import WeightedBinaryCrossEntropyLoss, LogisticLoss, getLossFunctions, calculateLoss
+    from model import TabliterModel
     from dataloader import get_dataloader
     from train import train
+    from evaluate import evaluate
     from describe import describe_model
     
     # Constants
@@ -33,13 +25,8 @@ def run():
     RUN_NAME = 'test'
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-    TASKS = {'train': True, 'eval': False, 'postprocess': False}
-    # BEST_RUN = '2023_06_09__15_01'
-    # BEST_RUN = '2023_06_12__18_13'
-    BEST_RUN = None  
-    
-    LUMINOSITY_GT_FEATURES_MAX = 240
-    LUMINOSITY_FILLER = 255
+    TASKS = {'train': False, 'eval': True, 'postprocess': False}
+    BEST_RUN = Path(r"F:\ml-parsing-project\table-parse-split\models\4_separator_loss_exponential\best.pt")
 
     PADDING = 40
     COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
@@ -72,134 +59,12 @@ def run():
 
         # Train
         train(epochs=EPOCHS, max_lr=MAX_LR,
-            path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model)
+            path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model, device=DEVICE)
 
     if TASKS['eval']:
-        modelRun = BEST_RUN or RUN_NAME
-        pathModelDict = PATH_ROOT / 'models' / modelRun / 'best.pt'
-        model.load_state_dict(torch.load(pathModelDict))
-        model.eval()
+        path_best_model = BEST_RUN if not TASKS['train'] else path_model / 'best.pt'
+        evaluate(path_model=path_best_model, path_data=path_data / 'val', device=DEVICE)
 
-        dataloader_val = get_dataloader(dir_data=path_data / 'val')
-        lossFunctions = getLossFunctions(dataloader=get_dataloader(dir_data=path_data / 'train'))
-
-        # Prepare folders
-        path_annotations_raw_val = path_model / 'val_annotated'
-        replaceDirs(path_annotations_raw_val)  
-
-        # Predict
-        def convert_01_array_to_visual(array, invert=False, width=40) -> np.array:
-            luminosity = (1 - array) * LUMINOSITY_GT_FEATURES_MAX if invert else array * LUMINOSITY_GT_FEATURES_MAX
-            luminosity = luminosity.round(0).astype(np.uint8)
-            luminosity = np.expand_dims(luminosity, axis=1)
-            luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
-            return luminosity
-
-        def eval_loop(dataloader, model, lossFunctions, outPath=None):
-            batchCount = len(dataloader)
-            eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.int64)
-            with torch.no_grad():
-                for batchNumber, batch in enumerate(dataloader):
-                    # Compute prediction and loss
-                    preds = model(batch.features)
-                    eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
-                    eval_loss += eval_loss_batch
-                    correct  += correct_batch
-                    maxCorrect  += maxCorrect_batch
-
-                    # Visualise
-                    if outPath:
-                        os.makedirs(outPath, exist_ok=True)
-                        batch_size = dataloader.batch_size
-                        for sampleNumber in range(batch_size):      # sampleNumber = 0
-                            # Sample data
-                            # Sample data | Image
-                            pathImage = Path(batch.meta.path_image[sampleNumber])
-                            img_annot = cv.imread(str(pathImage), flags=cv.IMREAD_GRAYSCALE)
-                            img_initial_size = img_annot.shape
-                            
-                            # Sample data | Ground truth
-                            gt = {}
-                            gt['row'] = batch.targets.row_line[sampleNumber].squeeze().cpu().numpy()
-                            gt['col'] = batch.targets.col_line[sampleNumber].squeeze().cpu().numpy()
-
-                            predictions = {}
-                            predictions['row'] = preds.row[sampleNumber].squeeze().cpu().numpy()
-                            predictions['col'] = preds.col[sampleNumber].squeeze().cpu().numpy()
-                            outName = f'{pathImage.stem}.png'
-
-                            # Sample data | Features
-                            pathFeatures = pathImage.parent.parent / 'features' / f'{pathImage.stem}.json'
-                            with open(pathFeatures, 'r') as f:
-                                features = json.load(f)
-                            features = {key: np.array(value) for key, value in features.items()}
-
-                            # Draw
-                            row_annot = []
-                            col_annot = []
-
-                            # Draw | Ground truth
-                            gt_row = convert_01_array_to_visual(gt['row'], width=40)
-                            row_annot.append(gt_row)
-                            gt_col = convert_01_array_to_visual(gt['col'], width=40)
-                            col_annot.append(gt_col)
-                        
-                            # Draw | Features | Text is startlike
-                            indicator_textline_like_rowstart = convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20)
-                            row_annot.append(indicator_textline_like_rowstart)
-                            indicator_nearest_right_is_startlike = convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20)
-                            col_annot.append(indicator_nearest_right_is_startlike)
-
-                            # Draw | Features | Words crossed (lighter = fewer words crossed)
-                            wc_row = convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20)
-                            row_annot.append(wc_row)
-                            wc_col = convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
-                            col_annot.append(wc_col)
-
-                            # Draw | Features | Add feature bars
-                            row_annot = np.concatenate(row_annot, axis=1)
-                            img_annot = np.concatenate([img_annot, row_annot], axis=1)
-
-                            col_annot = np.concatenate(col_annot, axis=1).T
-                            col_annot = np.concatenate([col_annot, np.full(shape=(col_annot.shape[0], row_annot.shape[1]), fill_value=LUMINOSITY_FILLER, dtype=np.uint8)], axis=1)
-                            img_annot = np.concatenate([img_annot, col_annot], axis=0)
-
-                            # Draw | Predictions
-                            img_predictions_row = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
-                            indicator_predictions_row = convert_01_array_to_visual(1-predictions['row'], width=img_initial_size[1])
-                            img_predictions_row[:indicator_predictions_row.shape[0], :indicator_predictions_row.shape[1]] = indicator_predictions_row
-                            img_predictions_row = cv.cvtColor(img_predictions_row, code=cv.COLOR_GRAY2RGB)
-                            img_predictions_row[:, :, 0] = 255
-                            img_predictions_row = Image.fromarray(img_predictions_row).convert('RGBA')
-                            img_predictions_row.putalpha(int(0.1*255))
-
-                            img_predictions_col = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
-                            indicator_predictions_col = convert_01_array_to_visual(1-predictions['col'], width=img_initial_size[0]).T
-                            img_predictions_col[:indicator_predictions_col.shape[0], :indicator_predictions_col.shape[1]] = indicator_predictions_col
-                            img_predictions_col = cv.cvtColor(img_predictions_col, code=cv.COLOR_GRAY2RGB)
-                            img_predictions_col[:, :, 0] = 255
-                            img_predictions_col = Image.fromarray(img_predictions_col).convert('RGBA')
-                            img_predictions_col.putalpha(int(0.1*255))
-
-                            img_annot_color = Image.fromarray(cv.cvtColor(img_annot, code=cv.COLOR_GRAY2RGB)).convert('RGBA')
-                            img_predictions = Image.alpha_composite(img_predictions_col, img_predictions_row)
-                            img_complete = Image.alpha_composite(img_annot_color, img_predictions).convert('RGB')
-
-                            img_complete.save(outPath / f'{outName}', format='png')
-
-            eval_loss = eval_loss / batchCount
-            shareCorrect = correct / maxCorrect
-
-            print(f'''Evaluation on best model
-                Accuracy line-level: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[2].item()):>0.1f}% (col)
-                Separator count (relative to truth): {(100*shareCorrect[1].item()):>0.1f}% (row) | {(100*shareCorrect[3].item()):>0.1f}% (col)
-                Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row-line) | {eval_loss[2].item():.3f} (col-line) | {eval_loss[1].item():.3f} (row-separator) | {eval_loss[3].item():.3f} (col-separator)''')
-            
-            if outPath:
-                return outPath
-
-        # Visualize results
-        eval_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, outPath=path_annotations_raw_val)
 
     if TASKS['postprocess']:
         print(''*4, 'Post-processing', ''*4)

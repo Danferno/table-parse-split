@@ -5,24 +5,20 @@ from time import perf_counter
 from datetime import datetime
 
 import torch
+from utils import replaceDirs
 from model import TabliterModel, LOSS_ELEMENTS_COUNT
-from loss import getLossFunctions, calculateLoss
+from loss import defineLossFunctions, calculateLoss
 from dataloader import get_dataloader
 from torch.utils.tensorboard import SummaryWriter
 
-def __replaceDirs(path):
-    try:
-        os.makedirs(path)
-    except FileExistsError:
-        shutil.rmtree(path)
-        os.makedirs(path)
+
 
 def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
           profile=False, device='cuda', writer=None, path_writer=None,
           replace_dirs=True):
     # Parse parameters
     path_model = Path(path_model)
-    make_dir = __replaceDirs if replace_dirs else os.makedirs
+    make_dir = replaceDirs if replace_dirs else os.makedirs
     path_model = path_model if not path_model_add_timestamp else path_model / datetime.now().strftime("%Y_%m_%d__%H_%M")
 
     path_writer = path_writer or f"torchlogs/{path_model.stem}"
@@ -37,7 +33,7 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
     dataloader_train = get_dataloader(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
     dataloader_val = get_dataloader(dir_data=path_data_val, shuffle=False, device=device)
 
-    lossFunctions = getLossFunctions(dataloader=dataloader_train)
+    lossFunctions = defineLossFunctions(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=len(dataloader_train), epochs=epochs)
 

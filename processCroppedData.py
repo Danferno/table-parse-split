@@ -1027,5 +1027,5 @@ else:
 print(f'Tables parsed: {tables}\nErrors: {errors} ({(errors/tables*100):.00f}%)')
 
 # Split into train/val/test
-from generateFakeData import splitData
+from archive.generateFakeData import splitData
 splitData(pathIn=pathOut_all, imageFormat='.png', trainRatio=0.85, valRatio=0.1)

@@ -1,7 +1,12 @@
 # Imports
+import json
+
 import torch
 from torch import nn
 from model import LOSS_ELEMENTS, LOSS_ELEMENTS_COUNT, ORIENTATIONS
+
+# Constants
+LOSS_FUNCTIONS_INFO_FILENAME = 'lossFunctionInfo.json'
  
 
 # Loss classes
@@ -53,14 +58,24 @@ def __calculateWeights(dataloader):
     
     return classWeights
 
-def getLossFunctions(dataloader):
+def defineLossFunctions(dataloader, path_model):
     ''' Attach dataloader of your train data to calculate relative weights for separator indicators.
     These weights make it less likely the model will just always predict the most common class.'''
     classWeights = __calculateWeights(dataloader=dataloader)
     lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']), 'row_separator_count': LogisticLoss(limit_upper=1/2),
                     'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': LogisticLoss(limit_upper=1/2)} 
+    
+    with open(path_model / LOSS_FUNCTIONS_INFO_FILENAME, 'w') as f:
+        json.dump(fp=f, obj={'classWeights': classWeights, 'limit_upper': 1/2})
+    
     return lossFunctions
 
+def getLossFunctions(path_model):
+    with open(path_model / LOSS_FUNCTIONS_INFO_FILENAME, 'r') as f:
+        lossFunctionInfo = json.load(fp=f)
+    lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['row']), 'row_separator_count': LogisticLoss(limit_upper=lossFunctionInfo['limit_upper']),
+                     'col_line': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['col']), 'col_separator_count': LogisticLoss(limit_upper=lossFunctionInfo['limit_upper'])} 
+    return lossFunctions
 
 # Loss function | Define weighted loss function
 def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
