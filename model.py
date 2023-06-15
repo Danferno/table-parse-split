@@ -5,7 +5,8 @@ def run():
     from pathlib import Path
     import json
     import torch
-    from torch import nn
+    from torch import nn, autocast
+    from torch.cuda.amp import GradScaler
     from torchvision.io import read_image, ImageReadMode
     from torch.utils.data import Dataset, DataLoader
     from torch import Tensor
@@ -56,10 +57,10 @@ def run():
     COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
 
     # Model parameters
-    EPOCHS = 50
+    EPOCHS = 100
     BATCH_SIZE = 1
     MAX_LR = 0.08
-    HIDDEN_SIZES = [45, 15]
+    HIDDEN_SIZES_FEATURES = [48, 16]
 
     CONV_LINESCANNER_SIZE = 10
     CONV_LINESCANNER_CHANNELS = 2
@@ -84,6 +85,7 @@ def run():
 
     # Derived constants
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    USE_MIXED_PRECISION = False
     LOSS_ELEMENTS_COUNT = len(LOSS_ELEMENTS)
     RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
 
@@ -216,7 +218,7 @@ def run():
                      feature_count_row_separators:int, feature_count_col_separators:int,
                      image_convolution_parameters={'channels_1': 2, 'size_1': (4, 4), 'pool_count_1': 4},
                      preds_convolution_parameters={'channels_1': 3, 'channels_2': 3, 'size_1': (4), 'size_2': (10)},
-                     hidden_sizes_features=[15,10], hidden_sizes_separators=[20, 5],
+                     hidden_sizes_features=[48, 16], hidden_sizes_separators=[24, 8],
                      truth_threshold=0.8):
             super().__init__()
             # Parameters
@@ -267,10 +269,10 @@ def run():
             kernel = (1, CONV_LINESCANNER_SIZE) if orientation == 'rows' else (CONV_LINESCANNER_SIZE, 1)
             max_transformer = (None, 1) if orientation == 'rows' else (None, 1)
             sequence = nn.Sequential(OrderedDict([
-                (f'ls_{orientation}_conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LINESCANNER_CHANNELS, kernel_size=kernel, stride=kernel, padding='valid', bias=False)),
-                (f'ls_{orientation}_norm', nn.BatchNorm2d(CONV_LINESCANNER_CHANNELS)),
-                (f'ls_{orientation}_relu', nn.ReLU()),
-                (f'ls_{orientation}_pool', nn.AdaptiveMaxPool2d(max_transformer))
+                (f'conv1', nn.Conv2d(in_channels=1, out_channels=CONV_LINESCANNER_CHANNELS, kernel_size=kernel, stride=kernel, padding='valid', bias=False)),
+                (f'norm', nn.BatchNorm2d(CONV_LINESCANNER_CHANNELS)),
+                (f'relu', nn.ReLU()),
+                (f'pool', nn.AdaptiveMaxPool2d(max_transformer))
             ]))
             return sequence
             
@@ -288,12 +290,12 @@ def run():
             
         def addPredConvLayer(self):
             sequence = nn.Sequential(OrderedDict([
-                ('predconv1', nn.Conv1d(in_channels=1, out_channels=self.preds_convolution_parameters['channels_1'], kernel_size=self.preds_convolution_parameters['size_1'], padding='same', padding_mode='replicate', bias=False)),
-                ('predconv1_norm', nn.BatchNorm1d(self.preds_convolution_parameters['channels_1'])),
-                ('predconv1_relu', nn.ReLU()),
-                ('predconv2', nn.Conv1d(in_channels=self.preds_convolution_parameters['channels_1'], out_channels=self.preds_convolution_parameters['channels_2'], kernel_size=self.preds_convolution_parameters['size_2'], padding='same', padding_mode='replicate', bias=False)),
-                ('predconv2_norm', nn.BatchNorm1d(self.preds_convolution_parameters['channels_2'])),
-                ('predconv2_relu', nn.ReLU())
+                ('conv1', nn.Conv1d(in_channels=1, out_channels=self.preds_convolution_parameters['channels_1'], kernel_size=self.preds_convolution_parameters['size_1'], padding='same', padding_mode='replicate', bias=False)),
+                ('conv1_norm', nn.BatchNorm1d(self.preds_convolution_parameters['channels_1'])),
+                ('conv1_relu', nn.ReLU()),
+                ('conv2', nn.Conv1d(in_channels=self.preds_convolution_parameters['channels_1'], out_channels=self.preds_convolution_parameters['channels_2'], kernel_size=self.preds_convolution_parameters['size_2'], padding='same', padding_mode='replicate', bias=False)),
+                ('conv2_norm', nn.BatchNorm1d(self.preds_convolution_parameters['channels_2'])),
+                ('conv2_relu', nn.ReLU())
             ]))
             return sequence
         def addLinearLayer_depth2(self, in_features:int, hidden_sizes=[6]):
@@ -425,7 +427,7 @@ def run():
             # Output
             return Output(row=row_probs, col=col_probs)
 
-    model = TabliterModel(hidden_sizes_features=HIDDEN_SIZES, feature_count_row_separators=FEATURE_COUNT_ROW_SEPARATORS,feature_count_col_separators=FEATURE_COUNT_COL_SEPARATORS,
+    model = TabliterModel(hidden_sizes_features=HIDDEN_SIZES_FEATURES, feature_count_row_separators=FEATURE_COUNT_ROW_SEPARATORS,feature_count_col_separators=FEATURE_COUNT_COL_SEPARATORS,
                           image_convolution_parameters={'channels_1': CONV_LETTER_CHANNELS, 'size_1': CONV_LETTER_KERNEL, 'pool_count_1': CONV_FINAL_AVG_COUNT},
                           preds_convolution_parameters={'channels_1': CONV_PRED_CHANNELS, 'channels_2': CONV_PRED_CHANNELS, 'size_1': CONV_PRED_WINDOWS[0], 'size_2': CONV_PRED_WINDOWS[1]}).to(DEVICE)
 
@@ -462,6 +464,19 @@ def run():
                         target    * torch.log(input_clamped)
 
             return torch.neg(torch.mean(loss))
+        
+    class LogisticLoss(nn.Module):
+        ''' The logistic loss is 0 when the distance between the two targets is 0 and has a maximum of 1 when the distance is infinitely large.
+        Higher distances lead to higher losses, but the effect diminishes to keep the size of the loss bounded between [0, 1) '''
+        def __init__(self, limit_upper:float=1):
+            super(LogisticLoss, self).__init__()
+            self.limit_upper = limit_upper
+            self.scale = self.limit_upper / (1/2)
+
+        def forward(self, input, target):
+            distance = torch.abs(target - input)
+            loss = self.scale / (1 + torch.exp(-0.5*distance)) - self.limit_upper
+            return loss
 
     def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False):   
         loss = torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=DEVICE, dtype=torch.float32)
@@ -503,10 +518,11 @@ def run():
     timers['model_definition'] = perf_counter() - start_model_definition
 
     # Train
-    lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']), 'row_separator_count': nn.PoissonNLLLoss(log_input=False),
-                    'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': nn.PoissonNLLLoss(log_input=False)} 
+    lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']), 'row_separator_count': LogisticLoss(limit_upper=1/2),
+                    'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': LogisticLoss(limit_upper=1/2)} 
     optimizer = torch.optim.SGD(model.parameters(), lr=MAX_LR)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=MAX_LR, steps_per_epoch=len(dataloader_train), epochs=EPOCHS)
+    scaler = GradScaler(enabled=USE_MIXED_PRECISION)
 
     def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4):
         print('Train')
@@ -516,13 +532,15 @@ def run():
         epoch_loss = 0
         for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss
-            preds = model(batch.features)
-            loss = calculateLoss(batch.targets, preds, lossFunctions)
-            epoch_loss += loss
+            with autocast(device_type=DEVICE, enabled=USE_MIXED_PRECISION):
+                preds = model(batch.features)
+                loss = calculateLoss(batch.targets, preds, lossFunctions)
+                epoch_loss += loss
             
             # Backpropagation
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
             scheduler.step()
 
@@ -555,7 +573,7 @@ def run():
             Separator count (relative to truth): {(100*shareCorrect[1].item()):>0.1f}% (row) | {(100*shareCorrect[3].item()):>0.1f}% (col)
             Avg val loss: {val_loss.sum().item():.3f} (total) | {val_loss[0].item():.3f} (row-line) | {val_loss[2].item():.3f} (col-line) | {val_loss[1].item():.3f} (row-separator) | {val_loss[3].item():.3f} (col-separator)''')
         
-        return val_loss.sum()
+        return val_loss
 
     if TASKS['train']:
         # Describe model
@@ -593,12 +611,18 @@ def run():
                 model.eval()
                 val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions)
 
-                writer.add_scalar('Train loss', scalar_value=train_loss, global_step=epoch)
-                writer.add_scalar('Val loss', scalar_value=val_loss, global_step=epoch)
+                writer.add_scalar('Train/Loss', scalar_value=train_loss, global_step=epoch)
+                writer.add_scalar('Val/Loss/Total', scalar_value=val_loss.sum(), global_step=epoch)
+                writer.add_scalars('Val/Loss/Components', tag_scalar_dict={
+                    'row_line': val_loss[0],
+                    'row_separator_count': val_loss[1],
+                    'col_line': val_loss[2],
+                    'col_separator_count': val_loss[3]
+                }, global_step=epoch)
                 writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
+                if val_loss.sum() < best_val_loss:
+                    best_val_loss = val_loss.sum()
                     torch.save(model.state_dict(), pathModel / 'best.pt')
 
             torch.save(model.state_dict(), pathModel / f'last.pt')
@@ -897,8 +921,11 @@ def run():
                             cell['text'] = ' '.join(wordsDf.loc[overlap, 'text'])
 
                     # Data | Convert to dataframe
-                    df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
-                    df = df.dropna(axis='columns', how='all').dropna(axis='index', how='all').reset_index(drop=True)
+                    if cells:
+                        df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
+                        df = df.dropna(axis='columns', how='all').dropna(axis='index', how='all').reset_index(drop=True)
+                    else:
+                        df = pd.DataFrame()
 
                     if len(df):
                         # Data | Clean
