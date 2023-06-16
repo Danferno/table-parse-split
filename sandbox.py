@@ -7,7 +7,7 @@ def run():
     from train import train
     from evaluate import evaluate
     from describe import describe_model
-    from process import process
+    from process import predict
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
@@ -50,7 +50,7 @@ def run():
 
     if TASKS['postprocess']:
         path_best_model = BEST_RUN if not TASKS['train'] else path_model / 'model_best.pt'
-        process(path_model_file=path_best_model, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
+        predict(path_model_file=path_best_model, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
                     path_pdfs=path_pdfs, path_words=path_words, padding=PADDING)
 
 if __name__ == '__main__':

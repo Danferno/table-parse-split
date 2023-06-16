@@ -63,7 +63,10 @@ def scale_cell_to_dpi(cell, dpi_start, dpi_target):
     return cell
 
 # Function
-def process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, text_scale=1):
+def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cuda', replace_dirs='warn', draw_images=False, padding=40):
+    ''' Detect tables'''
+    ...
+def predict(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, draw_text_scale=1):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data); path_words = Path(path_words); path_pdfs = Path(path_pdfs)
 
@@ -88,11 +91,11 @@ def process(path_model_file, path_data, path_words, path_pdfs, device='cuda', re
     # Padding separator
     paddingSeparator = np.array([[0, padding]])
     TableRect = namedtuple('tableRect', field_names=['x0', 'x1', 'y0', 'y1'])
-    FONT_TEXT = ImageFont.truetype('arial.ttf', size=int(26*text_scale))
-    FONT_BIG = ImageFont.truetype('arial.ttf', size=int(48*text_scale))
+    FONT_TEXT = ImageFont.truetype('arial.ttf', size=int(26*draw_text_scale))
+    FONT_BIG = ImageFont.truetype('arial.ttf', size=int(48*draw_text_scale))
 
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc='Process | Looping over batches'):
+        for batch in tqdm(dataloader, desc='Process | Predict | Looping over batches'):
             # Compute prediction
             preds = model(batch.features)
 
@@ -254,4 +257,4 @@ if __name__ == '__main__':
     path_words = PATH_ROOT / 'data' / 'words'
     path_pdfs = PATH_ROOT / 'data' / 'pdfs'
 
-    process(path_model_file=path_model_file, path_data=path_data / 'val', path_words=path_words, device=device)
+    predict(path_model_file=path_model_file, path_data=path_data / 'val', path_words=path_words, device=device)
