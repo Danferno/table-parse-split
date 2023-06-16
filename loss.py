@@ -6,8 +6,7 @@ from torch import nn
 from model import LOSS_ELEMENTS, LOSS_ELEMENTS_COUNT, ORIENTATIONS
 
 # Constants
-LOSS_FUNCTIONS_INFO_FILENAME = 'lossFunctionInfo.json'
- 
+LOSS_FUNCTIONS_INFO_FILENAME = 'lossFunctionInfo.pt'
 
 # Loss classes
 class WeightedBinaryCrossEntropyLoss(nn.Module):
@@ -65,14 +64,11 @@ def defineLossFunctions(dataloader, path_model):
     lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']), 'row_separator_count': LogisticLoss(limit_upper=1/2),
                     'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': LogisticLoss(limit_upper=1/2)} 
     
-    with open(path_model / LOSS_FUNCTIONS_INFO_FILENAME, 'w') as f:
-        json.dump(fp=f, obj={'classWeights': classWeights, 'limit_upper': 1/2})
-    
+    torch.save({'classWeights': classWeights, 'limit_upper': 1/2}, path_model / LOSS_FUNCTIONS_INFO_FILENAME)   
     return lossFunctions
 
-def getLossFunctions(path_model):
-    with open(path_model / LOSS_FUNCTIONS_INFO_FILENAME, 'r') as f:
-        lossFunctionInfo = json.load(fp=f)
+def getLossFunctions(path_model_file):
+    lossFunctionInfo = torch.load(path_model_file.parent / LOSS_FUNCTIONS_INFO_FILENAME)   
     lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['row']), 'row_separator_count': LogisticLoss(limit_upper=lossFunctionInfo['limit_upper']),
                      'col_line': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['col']), 'col_separator_count': LogisticLoss(limit_upper=lossFunctionInfo['limit_upper'])} 
     return lossFunctions

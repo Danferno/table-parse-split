@@ -3,29 +3,42 @@ import os, shutil
 from pathlib import Path
 from time import perf_counter
 from datetime import datetime
+from tqdm import tqdm
 
 import torch
-from utils import replaceDirs
+from utils import makeDirs
 from model import TabliterModel, LOSS_ELEMENTS_COUNT
 from loss import defineLossFunctions, calculateLoss
 from dataloader import get_dataloader
 from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
+import matplotlib; matplotlib.use('Agg')
+import numpy as np
 
-
+# Helper functions
+def add_weights(model, epoch, writer):
+    for name, parameter in tqdm(list(model.named_parameters()), 'Train | Report | Visualizing weights'):
+        weight = parameter.data.flatten().cpu().numpy()       
+        fig = plt.figure()
+        weightCount = len(weight)
+        plt.bar(np.arange(weightCount), weight, width=1)
+        if 1 < weightCount < 10:
+            plt.xticks(np.arange(weightCount), np.arange(weightCount) + 1)
+        plt.xlabel(name)
+        writer.add_figure(tag=name, figure=fig, global_step=epoch, close=True)
 
 def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
-          profile=False, device='cuda', writer=None, path_writer=None,
-          replace_dirs=True):
+          profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10,
+          replace_dirs='warn'):
     # Parse parameters
     path_model = Path(path_model)
-    make_dir = replaceDirs if replace_dirs else os.makedirs
     path_model = path_model if not path_model_add_timestamp else path_model / datetime.now().strftime("%Y_%m_%d__%H_%M")
 
     path_writer = path_writer or f"torchlogs/{path_model.stem}"
     writer = writer or SummaryWriter(path_writer)
 
     # Create folders
-    make_dir(path_model)
+    makeDirs(path_model, replaceDirs=replace_dirs)
 
     # Initialize elements
     model = TabliterModel().to(device)
@@ -101,19 +114,20 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
 
             writer.add_scalar('Train/Loss', scalar_value=train_loss, global_step=epoch)
             writer.add_scalar('Val/Loss/Total', scalar_value=val_loss.sum(), global_step=epoch)
-            writer.add_scalars('Val/Loss/Components', tag_scalar_dict={
-                'row_line': val_loss[0],
-                'row_separator_count': val_loss[1],
-                'col_line': val_loss[2],
-                'col_separator_count': val_loss[3]
-            }, global_step=epoch)
+            writer.add_scalar('Val/Loss/Row Line', val_loss[0], global_step=epoch)
+            writer.add_scalar('Val/Loss/Col Line', val_loss[2], global_step=epoch)
+            writer.add_scalar('Val/Loss/Row Separator Count', val_loss[1], global_step=epoch)
+            writer.add_scalar('Val/Loss/Col Separator Count', val_loss[3], global_step=epoch)
             writer.add_scalar('Learning rate', scalar_value=learning_rate, global_step=epoch)
 
             if val_loss.sum() < best_val_loss:
                 best_val_loss = val_loss.sum()
-                torch.save(model.state_dict(), path_model / 'best.pt')
+                torch.save(model.state_dict(), path_model / 'model_best.pt')
 
-        torch.save(model.state_dict(), path_model / f'last.pt')
+            if (epoch % tensorboard_detail_frequency == 0):
+                add_weights(model=model, epoch=epoch, writer=writer)
+
+        torch.save(model.state_dict(), path_model / f'model_last.pt')
 
         if profile:
             print(prof.key_averages().table(sort_by="self_cpu_time_total"))
@@ -122,15 +136,35 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
         train_duration = perf_counter() - start_train
         print(f'Trained for {train_duration/60:0.2f} minutes')
 
-        # Add summary statistics to tensorboard
+        # Tensorboard
+        # Tensorboard | Add summary statistics to tensorboard
         writer.add_hparams(hparam_dict={'epochs': epochs,
                                 'batch_size': dataloader_train.batch_size,
                                 'max_lr': max_lr},
                 metric_dict={'val_loss': best_val_loss.sum().item()})
+        
+        # Tensorboard | Add precision-recall curve
+        model.load_state_dict(torch.load(path_model / 'model_best.pt')); model.eval()
+        preds = []
+        targets = []
+        with torch.no_grad():
+            for batch in tqdm(dataloader_train, desc="Train | Report | Adding precision-recall curve"):
+                pred = torch.cat([torch.flatten(preds) for preds in model(batch.features)])
+                preds.append(pred)
+
+                target = torch.cat([torch.flatten(batch.targets.row_line), torch.flatten(batch.targets.col_line)])
+                targets.append(target)
+        preds = torch.cat([pred for pred in preds])
+        targets = torch.cat([target for target in targets])
+
+        writer.add_pr_curve(tag='Train/All', labels=targets, predictions=preds, global_step=epochs, num_thresholds=1024)
+
+        # Tensorboard | Add weights histogram
+        add_weights(model=model, epoch=epochs, writer=writer)
         writer.close()
 
 if __name__ == '__main__':
     path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
     path_model = Path(r"F:\ml-parsing-project\table-parse-split\models")
-    path_model = path_model / 'test_model'
-    train(path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model)
+    path_model = path_model / 'test'
+    train(path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model, replace_dirs=True)

@@ -5,3 +5,5 @@
 *.pt
 predictions_data/
 val_annotated/
+annotated/
+processed/

@@ -1,17 +1,19 @@
 # Imports
-import os, json
+import json
 import cv2 as cv
 from PIL import Image
+from tqdm import tqdm
 
 from pathlib import Path
 import numpy as np
-import torch
+import torch        # type : ignore
 
 import utils
 from dataloader import get_dataloader
 from model import TabliterModel, LOSS_ELEMENTS_COUNT
 from loss import getLossFunctions, calculateLoss
 
+# Helper functions
 def __convert_01_array_to_visual(array, max_luminosity_features, invert=False, width=40) -> np.array:
     luminosity = (1 - array) * max_luminosity_features if invert else array * max_luminosity_features
     luminosity = luminosity.round(0).astype(np.uint8)
@@ -19,11 +21,11 @@ def __convert_01_array_to_visual(array, max_luminosity_features, invert=False, w
     luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
     return luminosity
 
-def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminosity_filler, device, draw_images, path_annotations_raw):
+def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminosity_filler, device, draw_images,path_annotations_raw, prediction_cutoff=0.5):
     batchCount = len(dataloader)
     eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64)
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc='Eval | Looping over batches'):
             # Compute prediction and loss
             preds = model(batch.features)
             eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
@@ -68,15 +70,15 @@ def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminos
                     col_annot.append(gt_col)
                 
                     # Draw | Features | Text is startlike
-                    indicator_textline_like_rowstart = __convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20)
+                    indicator_textline_like_rowstart = __convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20, max_luminosity_features=max_luminosity_features)
                     row_annot.append(indicator_textline_like_rowstart)
-                    indicator_nearest_right_is_startlike = __convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20)
+                    indicator_nearest_right_is_startlike = __convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20, max_luminosity_features=max_luminosity_features)
                     col_annot.append(indicator_nearest_right_is_startlike)
 
                     # Draw | Features | Words crossed (lighter = fewer words crossed)
-                    wc_row = __convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20)
+                    wc_row = __convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20, max_luminosity_features=max_luminosity_features)
                     row_annot.append(wc_row)
-                    wc_col = __convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
+                    wc_col = __convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20, max_luminosity_features=max_luminosity_features)
                     col_annot.append(wc_col)
 
                     # Draw | Features | Add feature bars
@@ -89,7 +91,8 @@ def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminos
 
                     # Draw | Predictions
                     img_predictions_row = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
-                    indicator_predictions_row = __convert_01_array_to_visual(1-predictions['row'], width=img_initial_size[1])
+                    predictions['row'][predictions['row'] < prediction_cutoff] = predictions['row'][predictions['row'] < prediction_cutoff] / (prediction_cutoff * 10)
+                    indicator_predictions_row = __convert_01_array_to_visual(1-predictions['row'], width=img_initial_size[1], max_luminosity_features=max_luminosity_features)
                     img_predictions_row[:indicator_predictions_row.shape[0], :indicator_predictions_row.shape[1]] = indicator_predictions_row
                     img_predictions_row = cv.cvtColor(img_predictions_row, code=cv.COLOR_GRAY2RGB)
                     img_predictions_row[:, :, 0] = 255
@@ -97,7 +100,8 @@ def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminos
                     img_predictions_row.putalpha(int(0.1*255))
 
                     img_predictions_col = np.full(img_annot.shape, fill_value=255, dtype=np.uint8)
-                    indicator_predictions_col = __convert_01_array_to_visual(1-predictions['col'], width=img_initial_size[0]).T
+                    predictions['col'][predictions['col'] < prediction_cutoff] = predictions['col'][predictions['col'] < prediction_cutoff] / (prediction_cutoff * 10)
+                    indicator_predictions_col = __convert_01_array_to_visual(1-predictions['col'], width=img_initial_size[0], max_luminosity_features=max_luminosity_features).T
                     img_predictions_col[:indicator_predictions_col.shape[0], :indicator_predictions_col.shape[1]] = indicator_predictions_col
                     img_predictions_col = cv.cvtColor(img_predictions_col, code=cv.COLOR_GRAY2RGB)
                     img_predictions_col[:, :, 0] = 255
@@ -113,7 +117,7 @@ def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminos
     eval_loss = eval_loss / batchCount
     shareCorrect = correct / maxCorrect
 
-    print(f'''Evaluation on best model
+    print(f'''Eval | Model statistics
         Accuracy line-level: {(100*shareCorrect[0].item()):>0.1f}% (row) | {(100*shareCorrect[2].item()):>0.1f}% (col)
         Separator count (relative to truth): {(100*shareCorrect[1].item()):>0.1f}% (row) | {(100*shareCorrect[3].item()):>0.1f}% (col)
         Avg val loss: {eval_loss.sum().item():.3f} (total) | {eval_loss[0].item():.3f} (row-line) | {eval_loss[2].item():.3f} (col-line) | {eval_loss[1].item():.3f} (row-separator) | {eval_loss[3].item():.3f} (col-separator)''')
@@ -121,34 +125,30 @@ def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminos
     if draw_images:
         return path_annotations_raw
 
-
-def evaluate(path_model, path_data, max_luminosity_features=240, luminosity_filler=255, device='cuda', replace_dirs='warn', draw_images=True, path_annotations_raw=None):
+# Function
+def evaluate(path_model_file, path_data, max_luminosity_features=240, luminosity_filler=255, device='cuda', replace_dirs='warn', draw_images=True, path_annotations_raw=None):
     # Parse parameters
-    path_model = Path(path_model); path_data = Path(path_data)
+    path_model_file = Path(path_model_file); path_data = Path(path_data)
     
     # Make folders
-    path_annotations_raw = path_annotations_raw or path_model.parent / 'annotated'
-    utils.makeDirs(path_annotations_raw, replace_dirs=replace_dirs)
+    path_annotations_raw = path_annotations_raw or path_model_file.parent / 'annotated'
+    utils.makeDirs(path_annotations_raw, replaceDirs=replace_dirs)
 
     # Load model
     model = TabliterModel().to(device)
-    model.load_state_dict(torch.load(path_model))
+    model.load_state_dict(torch.load(path_model_file))
     model.eval()
-
     dataloader = get_dataloader(dir_data=path_data)
-    lossFunctions = getLossFunctions(path_model=path_model)
-
-    # Prepare folders
-    path_annotations_val_raw = path_model / 'val_annotated'
-    replaceDirs(path_annotations_val_raw)  
+    lossFunctions = getLossFunctions(path_model_file=path_model_file)
 
     # Predict
     # Visualize results
     eval_loop(dataloader=dataloader, model=model, lossFunctions=lossFunctions, path_annotations_raw=path_annotations_raw, max_luminosity_features=max_luminosity_features, luminosity_filler=luminosity_filler, device=device, draw_images=draw_images)
 
+# Individual file run for testing
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    path_model = Path(r"F:\ml-parsing-project\table-parse-split\models\test\best.pt") 
+    path_model = Path(r"F:\ml-parsing-project\table-parse-split\models\test\model_best.pt") 
     path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
 
-    evaluate(path_model=path_model, path_data=path_data / 'val', device=device)
+    evaluate(path_model_file=path_model, path_data=path_data / 'val', device=device)

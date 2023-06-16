@@ -5,7 +5,7 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 import shutil
 from collections import defaultdict
-import fitz     # type: ignore
+import fitz     # type : ignore
 import pandas as pd; pd.set_option("mode.copy_on_write", True)
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -17,7 +17,7 @@ import pickle
 import pytesseract
 import easyocr
 from collections import namedtuple
-from torch.cuda import OutOfMemoryError
+from torch.cuda import OutOfMemoryError     # type : ignore
 import imagehash
 from glob import glob
 
