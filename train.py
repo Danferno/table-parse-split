@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 import torch
 from utils import makeDirs
-from model import TabliterModel, LOSS_ELEMENTS_COUNT
+from model import TableLineModel, LOSS_ELEMENTS_COUNT
 from loss import defineLossFunctions, calculateLoss
 from dataloader import get_dataloader
 from torch.utils.tensorboard import SummaryWriter
@@ -41,7 +41,7 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
     makeDirs(path_model, replaceDirs=replace_dirs)
 
     # Initialize elements
-    model = TabliterModel().to(device)
+    model = TableLineModel().to(device)
 
     dataloader_train = get_dataloader(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
     dataloader_val = get_dataloader(dir_data=path_data_val, shuffle=False, device=device)

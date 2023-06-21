@@ -41,7 +41,7 @@ PADDING = 40
 LINENO_GAP = 5
 PRECISION = np.float32
 ADJUST_LABELS_TO_TEXTLINES = True
-ADD_EDGE_BORDERS_TO_GT = True
+ADD_EDGE_BORDERS_TO_GT = False
 
 LANGUAGES = 'nld+fra+deu+eng'
 OCR_TYPES = ['tesseract_fitz', 'tesseract_fast', 'tesseract_legacy', 'easyocr']

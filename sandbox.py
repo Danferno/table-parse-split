@@ -3,7 +3,7 @@ def run():
     from pathlib import Path
     import torch    # type : ignore
         
-    from model import TabliterModel
+    from model import TableLineModel
     from train import train
     from evaluate import evaluate
     from describe import describe_model
@@ -11,7 +11,7 @@ def run():
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
-    RUN_NAME = '5_weightsReported'
+    RUN_NAME = '6_noSeparatorFeatures'
     PADDING = 40
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
@@ -19,7 +19,7 @@ def run():
     BEST_RUN = Path(r"F:\ml-parsing-project\table-parse-split\models\test\model_best.pt")
 
     # Model parameters
-    EPOCHS = 80
+    EPOCHS = 50
     MAX_LR = 0.08
 
     # Derived constants
@@ -32,7 +32,7 @@ def run():
     path_pdfs = PATH_ROOT / 'data' / 'pdfs'
 
     # Define model
-    model = TabliterModel().to(DEVICE)
+    model = TableLineModel().to(DEVICE)
 
     if TASKS['train']:
         # Describe model

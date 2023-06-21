@@ -1,3 +1,5 @@
+# TD: seems to drop last column?
+
 # Imports
 import torch    # type : ignore
 import numpy as np
@@ -12,7 +14,7 @@ from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
 
 import utils
-from model import TabliterModel
+from model import TableLineModel
 from dataloader import get_dataloader
 
 # Constants
@@ -80,7 +82,7 @@ def predict(path_model_file, path_data, path_words, path_pdfs, device='cuda', re
         utils.makeDirs(path_processed_images, replaceDirs=replace_dirs)
 
     # Load model
-    model = TabliterModel().to(device)
+    model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
     dataloader = get_dataloader(dir_data=path_data)
