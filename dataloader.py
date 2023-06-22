@@ -9,9 +9,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_image, ImageReadMode
 
 
-from model import Meta, Sample, Features, Targets, COMMON_VARIABLES, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES
+from model import Meta, Sample, Features, Targets, SeparatorTargets, SeparatorFeatures, SeparatorSample, COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES
 
-class TableDataset(Dataset):
+class LineDataset(Dataset):
     def __init__(self, dir_data,
                     device='cuda', image_format='.png'):
         # Store in self 
@@ -90,7 +90,55 @@ class TableDataset(Dataset):
         # Return sample
         return sample
     
-def get_dataloader(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png') -> DataLoader:
+class SeparatorDataset(Dataset):
+    def __init__(self, dir_data, dir_data_all=None, device='cuda', image_format='.png'):
+        # Store in self
+        dir_data = Path(dir_data)
+        dir_data_all = dir_data_all or dir_data.parent / 'all'
+        self.device = device
+        self.dir_images = dir_data / 'images'
+        self.dir_features = dir_data_all / 'features_separatorLevel'
+        self.dir_targets = dir_data_all / 'targets_separatorLevel'
+        self.image_format = image_format
+
+        # Get items
+        self.items = sorted([os.path.splitext(filename)[0] for filename in os.listdir(self.dir_images)])
+        
+    def __len__(self):
+        return len(self.items)
+    
+    @cache
+    def __getitem__(self, idx):
+        # Generate paths for specific items
+        tableName = self.items[idx]
+        path_image = str(self.dir_images / f'{tableName}{self.image_format}')
+        path_features = str(self.dir_features / f'{tableName}.json')
+        path_targets = str(self.dir_targets / f'{tableName}.json')
+
+        # Load sample
+        # Load sample | Targets
+        with open(path_targets, 'r') as f:
+            targetData = json.load(f)
+        targets_row = torch.tensor(targetData['row'], dtype=torch.int32)
+        targets_col = torch.tensor(targetData['col'], dtype=torch.int32)
+
+        targets = SeparatorTargets(row=targets_row.unsqueeze(-1).to(self.device),
+                                   col=targets_col.unsqueeze(-1).to(self.device))
+        
+        # Load sample | Features
+        with open(path_features, 'r') as f:
+            featureData = json.load(f)
+        
+        features_row = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('row')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES_SEPARATORLEVEL], dim=-1)
+        features_col = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('col')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES_SEPARATORLEVEL], dim=-1)
+        image = read_image(path_image, mode=ImageReadMode.GRAY).to(dtype=torch.float32) / 255
+        features = SeparatorFeatures(row=features_row, col=features_col, image=image)        
+
+        # Return sample
+        sample = SeparatorSample(features=features, targets=targets)
+        return sample
+    
+def get_dataloader_lineLevel(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png') -> DataLoader:
     # Parameters
     dir_data = Path(dir_data)
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
@@ -99,5 +147,22 @@ def get_dataloader(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=Tru
     assert batch_size == 1, 'Batch sizes larger than one currently not supported (clashes with flexible image format)'
 
     # Return dataloader
-    return DataLoader(dataset=TableDataset(dir_data=dir_data, device=device, image_format=image_format),
+    return DataLoader(dataset=LineDataset(dir_data=dir_data, device=device, image_format=image_format),
                       batch_size=batch_size, shuffle=shuffle)
+
+def get_dataloader_separatorLevel(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', dir_data_all=None):
+    # Parameters
+    dir_data = Path(dir_data)
+    dir_data_all = dir_data_all or dir_data.parent / 'all'
+    image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
+
+    # Checks
+    assert batch_size == 1, 'Batch sizes larger than one currently not supported (clashes with flexible image format)'
+
+    # Return dataloader
+    return DataLoader(dataset=SeparatorDataset(dir_data=dir_data, dir_data_all=dir_data_all, image_format=image_format, device=device), batch_size=batch_size, shuffle=shuffle)
+
+
+if __name__ == '__main__':
+    PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\real_narrow')
+    get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'train')

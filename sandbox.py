@@ -4,53 +4,63 @@ def run():
     import torch    # type : ignore
         
     from model import TableLineModel
-    from train import train
+    from train import train_lineLevel, train_separatorLevel
     from evaluate import evaluate
     from describe import describe_model
-    from process import predict
+    from process import predict_and_process, generate_featuresAndTargets_separatorLevel
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
-    RUN_NAME = '6_noSeparatorFeatures'
+    RUN_NAME = '7_separatorModelAdded'
     PADDING = 40
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-    TASKS = {'train': True, 'eval': True, 'postprocess': True}
-    BEST_RUN = Path(r"F:\ml-parsing-project\table-parse-split\models\test\model_best.pt")
+    TASKS = {'train_linemodel': False, 'eval_linemodel': False, 'train_separatormodel': True, 'postprocess': True}
+    BEST_RUN = Path(r"F:\ml-parsing-project\table-parse-split\models\6_noSeparatorFeatures\model_best.pt")
 
     # Model parameters
-    EPOCHS = 50
-    MAX_LR = 0.08
+    EPOCHS_LINELEVEL = 50
+    EPOCHS_SEPARATORLEVEL = 50
+    
+    MAX_LR_LINELEVEL = 0.08
+    MAX_LR_SEPARATORLEVEL = 0.08
 
     # Derived constants
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Paths
     path_data = PATH_ROOT / 'data' / 'real_narrow'
-    path_model = PATH_ROOT / 'models' / RUN_NAME
+    path_model_lineLevel = PATH_ROOT / 'models' / f'{RUN_NAME}_lineLevel'
+    path_model_separatorLevel = PATH_ROOT / 'models' / f'{RUN_NAME}_separatorLevel'
     path_words = PATH_ROOT / 'data' / 'words'
     path_pdfs = PATH_ROOT / 'data' / 'pdfs'
 
     # Define model
-    model = TableLineModel().to(DEVICE)
-
-    if TASKS['train']:
+    if TASKS['train_linemodel']:
         # Describe model
-        describe_model(model)     
+        model_lineLevel = TableLineModel().to(DEVICE)
+        describe_model(model_lineLevel)     
 
         # Train
-        train(epochs=EPOCHS, max_lr=MAX_LR, 
+        train_lineLevel(epochs=EPOCHS_LINELEVEL, max_lr=MAX_LR_LINELEVEL, 
                 path_data_train=path_data / 'train', path_data_val=path_data / 'val',
-                path_model=path_model, device=DEVICE, replace_dirs=True)
+                path_model=path_model_lineLevel, device=DEVICE, replace_dirs=True)
 
-    if TASKS['eval']:
-        path_best_model = BEST_RUN if not TASKS['train'] else path_model / 'model_best.pt'
-        evaluate(path_model_file=path_best_model, path_data=path_data / 'val', device=DEVICE, replace_dirs=True)
+    if TASKS['eval_linemodel']:
+        path_best_model_line = BEST_RUN if not TASKS['train_linemodel'] else path_model_lineLevel / 'model_best.pt'
+        evaluate(path_model_file=path_best_model_line, path_data=path_data / 'val', device=DEVICE, replace_dirs=True)
+
+    if TASKS['train_separatormodel']:
+        path_best_model_line = BEST_RUN if not TASKS['train_linemodel'] else path_model_lineLevel / 'model_best.pt'
+        generate_featuresAndTargets_separatorLevel(path_best_model_line=path_best_model_line, path_data=path_data / 'all', path_words=path_words, replace_dirs=True, draw_images=True)
+        train_separatorLevel(epochs=EPOCHS_SEPARATORLEVEL, max_lr=MAX_LR_SEPARATORLEVEL, 
+                path_data_train=path_data / 'train', path_data_val=path_data / 'val',
+                path_model=path_model_separatorLevel, device=DEVICE, replace_dirs=True)
 
 
     if TASKS['postprocess']:
-        path_best_model = BEST_RUN if not TASKS['train'] else path_model / 'model_best.pt'
-        predict(path_model_file=path_best_model, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
+        path_best_model_line = BEST_RUN if not TASKS['train'] else path_model_lineLevel / 'model_best.pt'
+        predict_and_process(path_model_file=path_best_model_line, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
                     path_pdfs=path_pdfs, path_words=path_words, padding=PADDING)
 
 if __name__ == '__main__':

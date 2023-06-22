@@ -9,7 +9,7 @@ import numpy as np
 import torch        # type : ignore
 
 import utils
-from dataloader import get_dataloader
+from dataloader import get_dataloader_lineLevel
 from model import TableLineModel, LOSS_ELEMENTS_COUNT
 from loss import getLossFunctions, calculateLoss
 
@@ -138,7 +138,7 @@ def evaluate(path_model_file, path_data, max_luminosity_features=240, luminosity
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = get_dataloader(dir_data=path_data)
+    dataloader = get_dataloader_lineLevel(dir_data=path_data)
     lossFunctions = getLossFunctions(path_model_file=path_model_file)
 
     # Predict

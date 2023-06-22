@@ -4,9 +4,11 @@ from torch import nn
 import torch
 # from torch_scatter import segment_csr
 
-
 # Constants
+# Constants | Common
 ORIENTATIONS = ['row', 'col']
+
+# Constants | Line Level
 FEATURE_TYPES = ORIENTATIONS + ['image', 'row_global', 'col_global']
 
 COMMON_VARIABLES = ['{}_avg', '{}_absDiff', '{}_spell_mean', '{}_spell_sd', '{}_wordsCrossed_count', '{}_wordsCrossed_relToMax', '{}_in_textrectangle']
@@ -19,13 +21,25 @@ LOSS_CHARACTERISTICS = ['line', 'separator_count']
 LOSS_ELEMENTS = [f'{orientation}_{characteristic}' for orientation in ORIENTATIONS for characteristic in LOSS_CHARACTERISTICS]
 LOSS_ELEMENTS_COUNT = len(LOSS_ELEMENTS)
 
+# Constants | Separator Level
+FEATURE_TYPES_SEPARATORLEVEL = ORIENTATIONS + ['image']
+COMMON_VARIABLES_SEPARATORLEVEL = ['text_between_separators_{}']
+
 
 # Named tuples
+# Named tuples | Common
+Output = namedtuple('output', ORIENTATIONS)
+
+# Named tuples | Line Level
 Sample = namedtuple('sample', ['features', 'targets', 'meta'])
 Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model', 'image_angle'])
 Features = namedtuple('features', FEATURE_TYPES)
 Targets = namedtuple('target', LOSS_ELEMENTS)
-Output = namedtuple('output', ORIENTATIONS)
+
+# Named tuples | Separator Level
+SeparatorTargets = namedtuple('target_separatorLevel', ORIENTATIONS)
+SeparatorFeatures = namedtuple('feature_separatorLevel', FEATURE_TYPES_SEPARATORLEVEL)
+SeparatorSample = namedtuple('sample_separatorLevel', ['features', 'targets'])
 
 
 # Models
@@ -97,13 +111,7 @@ class TableLineModel(nn.Module):
         self.layer_conv_preds_fc_row = self.addLinearLayer_depth2(in_features=self.preds_convolution_parameters['channels_2']+1)
         self.layer_conv_preds_fc_col = self.addLinearLayer_depth2(in_features=self.preds_convolution_parameters['channels_2']+1)
 
-        # Separator evaluator
-        # self.layer_separators_row = self.addLinearLayer(layerType=nn.Linear, in_features=self.feature_count_row_separators, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_separators)
-        # self.layer_separators_col = self.addLinearLayer(layerType=nn.Linear, in_features=self.feature_count_col_separators, out_features=1, activation=nn.ReLU, hidden_sizes=self.hidden_sizes_separators)
 
-        # # Prediction scores
-        # self.layer_pred_row = self.addLinearLayer_depth2(in_features=2, hidden_sizes=[2])
-        # self.layer_pred_col = self.addLinearLayer_depth2(in_features=2, hidden_sizes=[2])
 
         # Logit model
         self.layer_logit = nn.Sigmoid()
@@ -218,53 +226,6 @@ class TableLineModel(nn.Module):
         # Turn into probabilities
         row_probs = self.layer_logit(row_preds)
         col_probs = self.layer_logit(col_preds)
-
-        # Generate separator-specific features
-        # row_separators = self.preds_to_separators(predTensor=row_probs, threshold=self.truth_threshold)     # this will fail for batches (unequal length of separators)
-        # if row_separators.numel():
-        #     row_points = torch.cat([row_separators[:, 0, 0].unsqueeze(1), row_separators[:, :, 1]], dim=1)
-        #     row_min_per_separator = segment_csr(src=features.row, indptr=row_points, reduce='min')
-        #     row_max_per_separator = segment_csr(src=features.row, indptr=row_points, reduce='max')
-        #     row_separator_features = torch.cat([row_min_per_separator, row_max_per_separator,
-        #                                         row_inputs_global[:, :row_separators.shape[1], :]], dim=-1)
-        #     row_separator_scores = self.layer_separators_row(row_separator_features)
-
-        #     row_separators_scores_broadcast = row_preds
-        #     start_indices = row_separators[:, :, 0]
-        #     end_indices = row_separators[:, :, 1]
-        #     for i in range(row_separators.shape[1]):
-        #         row_separators_scores_broadcast[:, start_indices[:, i]:end_indices[:, i], :] = row_separator_scores[:, i, :]
-
-        # else:
-        #     row_separators_scores_broadcast = row_preds
-
-        # col_separators = self.preds_to_separators(predTensor=col_probs, threshold=self.truth_threshold)
-        # if col_separators.numel():               
-        #     col_points = torch.cat([col_separators[:, 0, 0].unsqueeze(1), col_separators[:, :, 1]], dim=1)           
-        #     col_min_per_separator = segment_csr(src=features.col, indptr=col_points, reduce='min')               
-        #     col_max_per_separator = segment_csr(src=features.col, indptr=col_points, reduce='max')
-        #     col_separator_features = torch.cat([col_min_per_separator, col_max_per_separator,
-        #                                         col_inputs_global[:, :col_separators.shape[1], :]], dim=-1)
-        #     col_separator_scores = self.layer_separators_col(col_separator_features)
-
-        #     col_separators_scores_broadcast = col_preds
-        #     start_indices = col_separators[:, :, 0]
-        #     end_indices = col_separators[:, :, 1]
-        #     for i in range(col_separators.shape[1]):
-        #         col_separators_scores_broadcast[:, start_indices[:, i]:end_indices[:, i], :] = col_separator_scores[:, i, :]
-        # else:
-        #     col_separators_scores_broadcast = col_preds&
-
-        # # Evaluate separators
-        # row_prob_features = torch.cat([row_preds, row_separators_scores_broadcast], dim=-1)
-        # col_prob_features = torch.cat([col_preds, col_separators_scores_broadcast], dim=-1)
-        
-        # row_prob_scores = self.layer_pred_row(row_prob_features)
-        # col_prob_scores = self.layer_pred_col(col_prob_features)
-
-        # # Turn into probabilities
-        # row_probs = self.layer_logit(row_prob_scores)
-        # col_probs = self.layer_logit(col_prob_scores)
 
         # Output
         return Output(row=row_probs, col=col_probs)

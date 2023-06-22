@@ -9,7 +9,7 @@ import torch
 from utils import makeDirs
 from model import TableLineModel, LOSS_ELEMENTS_COUNT
 from loss import defineLossFunctions, calculateLoss
-from dataloader import get_dataloader
+from dataloader import get_dataloader_lineLevel
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 import matplotlib; matplotlib.use('Agg')
@@ -27,7 +27,7 @@ def add_weights(model, epoch, writer):
         plt.xlabel(name)
         writer.add_figure(tag=name, figure=fig, global_step=epoch, close=True)
 
-def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
+def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
           profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10,
           replace_dirs='warn'):
     # Parse parameters
@@ -43,8 +43,8 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
     # Initialize elements
     model = TableLineModel().to(device)
 
-    dataloader_train = get_dataloader(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
-    dataloader_val = get_dataloader(dir_data=path_data_val, shuffle=False, device=device)
+    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
+    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, shuffle=False, device=device)
 
     lossFunctions = defineLossFunctions(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
@@ -163,8 +163,13 @@ def train(path_data_train, path_data_val, path_model, path_model_add_timestamp=F
         add_weights(model=model, epoch=epochs, writer=writer)
         writer.close()
 
+def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
+          profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10,
+          replace_dirs='warn'):
+    ...
+
 if __name__ == '__main__':
     path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
     path_model = Path(r"F:\ml-parsing-project\table-parse-split\models")
     path_model = path_model / 'test'
-    train(path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model, replace_dirs=True)
+    train_lineLevel(path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model, replace_dirs=True)

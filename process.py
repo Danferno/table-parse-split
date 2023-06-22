@@ -9,20 +9,22 @@ import easyocr
 import fitz     # type : ignore
 import cv2 as cv
 from tqdm import tqdm
+import json
+import os
 
 from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
 
 import utils
 from model import TableLineModel
-from dataloader import get_dataloader
+from dataloader import get_dataloader_lineLevel
 
 # Constants
 COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
 COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
 
 # Helper functions
-def preds_to_separators(predArray, paddingSeparator, threshold=0.8, setToMidpoint=False):
+def preds_to_separators(predArray, threshold=0.8, setToMidpoint=False, addPaddingSeparators=True, paddingSeparator=None):
     # Tensor > np.array on cpu
     if isinstance(predArray, torch.Tensor):
         predArray = predArray.cpu().numpy().squeeze()
@@ -32,7 +34,10 @@ def preds_to_separators(predArray, paddingSeparator, threshold=0.8, setToMidpoin
     separators_start = np.where(diff_in_separator_modus == 1)[0]
     separators_end = np.where(diff_in_separator_modus == -1)[0]
     separators = np.stack([separators_start, separators_end], axis=1)
-    separators = np.concatenate([paddingSeparator, separators], axis=0)
+
+    # Optionally add padding separators
+    if addPaddingSeparators:
+        separators = np.concatenate([paddingSeparator, separators], axis=0)
     
     # Convert wide separator to midpoint
     if setToMidpoint:
@@ -68,7 +73,198 @@ def scale_cell_to_dpi(cell, dpi_start, dpi_target):
 def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cuda', replace_dirs='warn', draw_images=False, padding=40):
     ''' Detect tables'''
     ...
-def predict(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, draw_text_scale=1):
+
+def predict_lineLevel(path_model_file, path_data, path_predictions_line=None, device='cuda', replace_dirs='warn'):
+    # Parse parameters
+    path_model_file = Path(path_model_file); path_data = Path(path_data)
+
+    # Make folders
+    path_predictions_line = path_predictions_line or path_data / 'predictions_lineLevel'
+    utils.makeDirs(path_predictions_line, replaceDirs=replace_dirs)
+
+    # Load model
+    model = TableLineModel().to(device)
+    model.load_state_dict(torch.load(path_model_file))
+    model.eval()
+    dataloader = get_dataloader_lineLevel(dir_data=path_data)
+    
+    # Loop over batches
+    batch_size = dataloader.batch_size
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc='Process | Predict line-level | Looping over batches'):
+            # Predict
+            preds = model(batch.features)
+
+            # Save
+            for sampleNumber in range(batch_size):
+                # Save | Get table name
+                image_path = Path(batch.meta.path_image[sampleNumber])
+                name_full = image_path.stem
+
+                # Save | Get separators
+                separators_row = preds_to_separators(predArray=preds.row[sampleNumber], setToMidpoint=False, addPaddingSeparators=False)
+                separators_col = preds_to_separators(predArray=preds.col[sampleNumber], setToMidpoint=False, addPaddingSeparators=False)
+
+                pred_dict = {'row_separator_predictions': separators_row.tolist(), 'col_separator_predictions': separators_col.tolist()}
+
+                with open(path_predictions_line / f'{name_full}.json', 'w') as f:
+                    json.dump(pred_dict, f)
+    with open(path_predictions_line.parent / 'path_model_predictions_lineLevel.txt', 'w') as f:
+        f.write(f'Model path: {path_model_file}')
+
+def generate_featuresAndTargets_separatorLevel(path_best_model_line, path_data, path_words, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
+    # Parse parameters
+    path_data = Path(path_data)
+    path_predictions_line = path_predictions_line or path_data / 'predictions_lineLevel'
+    path_features_separator = path_features_separator or path_data / 'features_separatorLevel'
+    path_targets_separator = path_targets_separator or path_data / 'targets_separatorLevel'
+    path_annotated_images = path_annotated_images or path_data / 'images_annotated_separatorLevel'
+
+    # Make folders
+    utils.makeDirs(path_features_separator, replaceDirs=replace_dirs)
+    utils.makeDirs(path_targets_separator, replaceDirs=replace_dirs)
+    utils.makeDirs(path_annotated_images, replaceDirs=replace_dirs)
+
+    # Predict line-level separator indicators
+    predict_lineLevel(path_model_file=path_best_model_line, path_data=path_data, replace_dirs=replace_dirs)
+
+    # Loop over tables
+    tableNames = [os.path.splitext(filename)[0] for filename in os.listdir(path_predictions_line)]
+    for tableName in tqdm(tableNames, desc='Process | Generate separator features | Looping over tables'):        # tableName = tableNames[0]
+        # Load 
+        # Load | Meta info
+        with open(path_data / 'meta' / f'{tableName}.json', 'r') as f:
+            metaInfo = json.load(f)
+
+        # Load | Text
+        wordsDf = utils.pageWords_to_tableWords(path_words=path_words, tableName=tableName, metaInfo=metaInfo)
+        wordsDf['text'] = wordsDf['text'].str.replace('.', '')
+
+        # Load | Separator proposals
+        with open(path_predictions_line / f'{tableName}.json', 'r') as f:
+            separators = json.load(f)
+        separators_row = separators['row_separator_predictions']
+        separators_col = separators['col_separator_predictions']
+        
+        separators_midpoints_row = [sum(separator)//2 for separator in separators_row]
+        separators_midpoints_col = [sum(separator)//2 for separator in separators_col]
+
+        # Load | Line level targets
+        with open(path_data / 'labels' / f'{tableName}.json', 'r') as f:
+            targets_lineLevel = json.load(f)
+        targets_lineLevel_row = targets_lineLevel['row']
+        targets_lineLevel_col = targets_lineLevel['col']
+
+        # Prepare
+        # Prepare | Get text between separators
+        edgeBottom = wordsDf['bottom'].max()
+        texts_between_separators_row = []
+        for idx, _ in enumerate(separators_midpoints_row):
+            firstEdge = separators_midpoints_row[idx]
+            try:
+                lastEdge = separators_midpoints_row[idx+1]
+            except IndexError:
+                lastEdge = edgeBottom
+            texts = wordsDf.loc[(wordsDf['top'] > firstEdge) & (wordsDf['bottom'] <= lastEdge), 'text'].to_list()
+            texts = [text for text in texts if text != '']
+            texts_between_separators_row.append(texts)
+
+        edgeRight = wordsDf['right'].max()
+        texts_between_separators_col = []
+        for idx, _ in enumerate(separators_midpoints_col):
+            firstEdge = separators_midpoints_col[idx]
+            try:
+                lastEdge = separators_midpoints_col[idx+1]
+            except IndexError:
+                lastEdge = edgeRight
+            texts = wordsDf.loc[(wordsDf['left'] > firstEdge) & (wordsDf['right'] <= lastEdge), 'text'].to_list()
+            texts = [text for text in texts if text != '']
+            texts_between_separators_col.append(texts)
+
+        # Features separator-level
+        features = {}
+
+        # Features | Any text between separators
+        features['text_between_separators_row'] = [int(len(texts) > 0) for texts in texts_between_separators_row]
+        features['text_between_separators_col'] = [int(len(texts) > 0) for texts in texts_between_separators_col]
+
+        # Features | Save
+        with open(path_features_separator / f'{tableName}.json', 'w') as f:
+            json.dump(features, f)    
+
+        
+        # Targets
+        targets_separatorLevel_row = []
+        for separator in separators_row:
+            targets_lineLevel_inSeparator = np.array(targets_lineLevel_row)[separator[0]:separator[1]]
+
+            contains_separatorLines = max(targets_lineLevel_inSeparator)
+             
+            pattern = np.diff(targets_lineLevel_inSeparator)
+            try:
+                firstEndOfSeparator = np.where(pattern == -1)[0][0]
+                lastStartOfSeparator = np.where(pattern == 1)[0][-1]
+                contains_multiple_spells = (firstEndOfSeparator < lastStartOfSeparator)
+            except IndexError:
+                contains_multiple_spells = False
+
+            proposal_is_separator = int((contains_separatorLines) and not (contains_multiple_spells))
+            targets_separatorLevel_row.append(proposal_is_separator)
+
+        targets_separatorLevel_col = []
+        for separator in separators_col:    # separator = separators_col[0]
+            targets_lineLevel_inSeparator = np.array(targets_lineLevel_col)[separator[0]:separator[1]]
+
+            contains_separatorLines = max(targets_lineLevel_inSeparator)
+             
+            pattern = np.diff(targets_lineLevel_inSeparator)
+            try:
+                firstEndOfSeparator = np.where(pattern == -1)[0][0]
+                lastStartOfSeparator = np.where(pattern == 1)[0][-1]
+                contains_multiple_spells = (firstEndOfSeparator < lastStartOfSeparator)
+            except IndexError:
+                contains_multiple_spells = False
+
+            proposal_is_separator = int((contains_separatorLines) and not (contains_multiple_spells))
+            targets_separatorLevel_col.append(proposal_is_separator)
+                 
+        # Targets separator-level
+        targets = {}
+        targets['row'] = targets_separatorLevel_row
+        targets['col'] = targets_separatorLevel_col
+
+        with open(path_targets_separator / f'{tableName}.json', 'w') as f:
+            json.dump(targets, f) 
+
+        # Visualise
+        if draw_images:
+            # Load image
+            img = Image.open(path_data / 'images' / f'{tableName}{image_format}').convert('RGBA')
+            
+            # Draw | Row
+            overlay_row = Image.new('RGBA', img.size, (0, 0, 0 ,0))
+            img_annot_row = ImageDraw.Draw(overlay_row)
+            
+            for idx, separator in enumerate(separators_row):
+                shape = [0, separator[0], img.width, separator[1]]
+                color = utils.COLOR_CORRECT if targets_separatorLevel_row[idx] == 1 else utils.COLOR_WRONG
+                img_annot_row.rectangle(xy=shape, fill=color)
+
+            # Draw | Col
+            overlay_col = Image.new('RGBA', img.size, (0, 0, 0 ,0))
+            img_annot_col = ImageDraw.Draw(overlay_col)
+            for idx, separator in enumerate(separators_col):
+                shape = [separator[0], 0, separator[1], img.height]
+                color = utils.COLOR_CORRECT if targets_separatorLevel_col[idx] == 1 else utils.COLOR_WRONG
+                img_annot_col.rectangle(xy=shape, fill=color)
+
+            # Save image
+            img = Image.alpha_composite(img, overlay_row)
+            img = Image.alpha_composite(img, overlay_col).convert('RGB')
+            img.save(path_annotated_images / f'{tableName}.png')
+
+
+def predict_and_process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, draw_text_scale=1):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data); path_words = Path(path_words); path_pdfs = Path(path_pdfs)
 
@@ -85,7 +281,7 @@ def predict(path_model_file, path_data, path_words, path_pdfs, device='cuda', re
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = get_dataloader(dir_data=path_data)
+    dataloader = get_dataloader_lineLevel(dir_data=path_data)
 
     # Load OCR reader
     reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
@@ -259,4 +455,4 @@ if __name__ == '__main__':
     path_words = PATH_ROOT / 'data' / 'words'
     path_pdfs = PATH_ROOT / 'data' / 'pdfs'
 
-    predict(path_model_file=path_model_file, path_data=path_data / 'val', path_words=path_words, device=device)
+    predict_and_process(path_model_file=path_model_file, path_data=path_data / 'val', path_words=path_words, device=device)
