@@ -9,7 +9,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_image, ImageReadMode
 
 
-from model import Meta, Sample, Features, Targets, SeparatorTargets, SeparatorFeatures, SeparatorSample, COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES
+from model import (Meta, Sample, Features, Targets,
+                   SeparatorTargets, SeparatorFeatures, SeparatorSample, 
+                   COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
 
 class LineDataset(Dataset):
     def __init__(self, dir_data,
@@ -91,7 +93,7 @@ class LineDataset(Dataset):
         return sample
     
 class SeparatorDataset(Dataset):
-    def __init__(self, dir_data, dir_data_all=None, device='cuda', image_format='.png'):
+    def __init__(self, dir_data, dir_data_all=None, dir_predictions_line=None, device='cuda', image_format='.png'):
         # Store in self
         dir_data = Path(dir_data)
         dir_data_all = dir_data_all or dir_data.parent / 'all'
@@ -99,10 +101,25 @@ class SeparatorDataset(Dataset):
         self.dir_images = dir_data / 'images'
         self.dir_features = dir_data_all / 'features_separatorLevel'
         self.dir_targets = dir_data_all / 'targets_separatorLevel'
+        self.dir_predictions_line = dir_predictions_line or dir_data_all / 'predictions_lineLevel'
         self.image_format = image_format
 
         # Get items
         self.items = sorted([os.path.splitext(filename)[0] for filename in os.listdir(self.dir_images)])
+
+        # Exclude items without row or column separators
+        tables_without_separators = []
+        for tableName in self.items:        # tableName = self.items[0]
+            path_proposedSeparators = str(self.dir_predictions_line / f'{tableName}.json')
+            with open(path_proposedSeparators, 'r') as f:
+                proposedSeparatorData = json.load(f)
+            if not all([len(value) > 0 for value in proposedSeparatorData.values()]):
+                tables_without_separators.append(tableName)
+
+        if tables_without_separators:
+            print(f'WARNING: Excluding {len(tables_without_separators)} tables from the data because they do not contain row or column separator predictions')
+            self.items = list(set(self.items) - set(tables_without_separators))
+
         
     def __len__(self):
         return len(self.items)
@@ -114,6 +131,7 @@ class SeparatorDataset(Dataset):
         path_image = str(self.dir_images / f'{tableName}{self.image_format}')
         path_features = str(self.dir_features / f'{tableName}.json')
         path_targets = str(self.dir_targets / f'{tableName}.json')
+        path_proposedSeparators = str(self.dir_predictions_line / f'{tableName}.json')
 
         # Load sample
         # Load sample | Targets
@@ -128,11 +146,18 @@ class SeparatorDataset(Dataset):
         # Load sample | Features
         with open(path_features, 'r') as f:
             featureData = json.load(f)
+        with open(path_proposedSeparators, 'r') as f:
+            proposedSeparatorData = json.load(f)
         
         features_row = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('row')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES_SEPARATORLEVEL], dim=-1)
         features_col = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('col')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES_SEPARATORLEVEL], dim=-1)
+
+        proposedSeparators_row = torch.tensor(proposedSeparatorData['row_separator_predictions'])
+        proposedSeparators_col = torch.tensor(proposedSeparatorData['col_separator_predictions'])
+
         image = read_image(path_image, mode=ImageReadMode.GRAY).to(dtype=torch.float32) / 255
-        features = SeparatorFeatures(row=features_row, col=features_col, image=image)        
+
+        features = SeparatorFeatures(row=features_row, col=features_col, image=image, proposedSeparators_row=proposedSeparators_row, proposedSeparators_col=proposedSeparators_col)        
 
         # Return sample
         sample = SeparatorSample(features=features, targets=targets)

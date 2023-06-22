@@ -3,7 +3,8 @@ import json
 
 import torch
 from torch import nn
-from model import LOSS_ELEMENTS, LOSS_ELEMENTS_COUNT, ORIENTATIONS
+from model import (LOSS_ELEMENTS_LINELEVEL, LOSS_ELEMENTS_LINELEVEL_COUNT, ORIENTATIONS,
+                   LOSS_ELEMENTS_SEPARATORLEVEL, LOSS_ELEMENTS_SEPARATORLEVEL_COUNT)
 
 # Constants
 LOSS_FUNCTIONS_INFO_FILENAME = 'lossFunctionInfo.pt'
@@ -49,22 +50,39 @@ def __calculateWeightsFromTargets(targets):
     classWeights = classWeights / classWeights.sum()
     return classWeights
 
-def __calculateWeights(dataloader):
+def __calculateWeights_lineLevel(dataloader):
     targets_row = [(batch.targets.row_line.sum().item(), batch.targets.row_line.shape[0]) for batch in iter(dataloader.dataset)]
     targets_col = [(batch.targets.col_line.sum().item(), batch.targets.col_line.shape[0]) for batch in iter(dataloader.dataset)]
     classWeights = {'row': __calculateWeightsFromTargets(targets=targets_row),
                 'col': __calculateWeightsFromTargets(targets=targets_col)}
     
     return classWeights
+def __calculateWeights_separatorLevel(dataloader):
+    targets_row = [(batch.targets.row.sum().item(), batch.targets.row.shape[0]) for batch in iter(dataloader.dataset)]
+    targets_col = [(batch.targets.col.sum().item(), batch.targets.col.shape[0]) for batch in iter(dataloader.dataset)]
+    classWeights = {'row': __calculateWeightsFromTargets(targets=targets_row),
+                'col': __calculateWeightsFromTargets(targets=targets_col)}
+    
+    return classWeights
 
-def defineLossFunctions(dataloader, path_model):
+def defineLossFunctions_lineLevel(dataloader, path_model):
     ''' Attach dataloader of your train data to calculate relative weights for separator indicators.
     These weights make it less likely the model will just always predict the most common class.'''
-    classWeights = __calculateWeights(dataloader=dataloader)
+    classWeights = __calculateWeights_lineLevel(dataloader=dataloader)
     lossFunctions = {'row_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']), 'row_separator_count': LogisticLoss(limit_upper=1/2),
-                    'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': LogisticLoss(limit_upper=1/2)} 
+                     'col_line': WeightedBinaryCrossEntropyLoss(weights=classWeights['col']), 'col_separator_count': LogisticLoss(limit_upper=1/2)} 
     
     torch.save({'classWeights': classWeights, 'limit_upper': 1/2}, path_model / LOSS_FUNCTIONS_INFO_FILENAME)   
+    return lossFunctions
+
+def defineLossFunctions_separatorLevel(dataloader, path_model):
+    ''' Attach dataloader of your train data to calculate relative weights for separator indicators.
+    These weights make it less likely the model will just always predict the most common class.'''
+    classWeights = __calculateWeights_separatorLevel(dataloader=dataloader)
+    lossFunctions = {'row_separator': WeightedBinaryCrossEntropyLoss(weights=classWeights['row']),
+                     'col_separator': WeightedBinaryCrossEntropyLoss(weights=classWeights['col'])} 
+    
+    torch.save({'classWeights': classWeights}, path_model / LOSS_FUNCTIONS_INFO_FILENAME)   
     return lossFunctions
 
 def getLossFunctions(path_model_file):
@@ -74,9 +92,9 @@ def getLossFunctions(path_model_file):
     return lossFunctions
 
 # Loss function | Define weighted loss function
-def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
-    loss = torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.float32)
-    correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64)
+def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
+    loss = torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.float32)
+    correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.int64)
 
     for idx_orientation, _ in enumerate(ORIENTATIONS):     # idx = 0; orientation = ORIENTATIONS[idx]
         # Line
@@ -84,7 +102,7 @@ def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False, de
         target_line = targets[idx_line].to(device)
         pred_line = preds[idx_orientation].to(device)
 
-        loss_element = LOSS_ELEMENTS[idx_line]
+        loss_element = LOSS_ELEMENTS_LINELEVEL[idx_line]
         loss_fn = lossFunctions[loss_element]
         loss[idx_line] = loss_fn(pred_line, target_line)
 
@@ -98,13 +116,36 @@ def calculateLoss(targets, preds, lossFunctions:dict, calculateCorrect=False, de
         pred_separators = torch.as_tensor(pred_line >= 0.5, dtype=torch.int8).squeeze(-1)
         pred_count = torch.min(torch.tensor([torch.where(torch.diff(pred_separators) == 1)[0].numel(), torch.where(torch.diff(pred_separators) == -1)[0].numel()]))
         
-        loss_element = LOSS_ELEMENTS[idx_count]
+        loss_element = LOSS_ELEMENTS_LINELEVEL[idx_count]
         loss_fn = lossFunctions[loss_element]
         loss[idx_count] = loss_fn(pred_count, target_count)
 
         if calculateCorrect:
             correct[idx_count] = pred_count.item()
             maxCorrect[idx_count] = target_count.item()
+    
+    if calculateCorrect:
+        return loss, correct, maxCorrect
+    else:
+        return loss.sum()
+
+def calculateLoss_separatorLevel(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
+    loss = torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.float32)
+    correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.int64)
+
+    for idx_orientation, _ in enumerate(ORIENTATIONS):     # awkward formulation to remain consistent with lineLevel function
+        # Separator
+        idx_separator = idx_orientation
+        target_separator = targets[idx_separator].to(device)
+        pred_separator = preds[idx_orientation].to(device)
+
+        loss_element = LOSS_ELEMENTS_SEPARATORLEVEL[idx_separator]
+        loss_fn = lossFunctions[loss_element]
+        loss[idx_separator] = loss_fn(pred_separator, target_separator)
+
+        if calculateCorrect:
+            correct[idx_separator] = ((pred_separator >= 0.5) == target_separator).sum().item()
+            maxCorrect[idx_separator] = pred_separator.numel()
     
     if calculateCorrect:
         return loss, correct, maxCorrect

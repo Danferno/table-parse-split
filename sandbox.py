@@ -15,7 +15,7 @@ def run():
     PADDING = 40
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-    TASKS = {'train_linemodel': False, 'eval_linemodel': False, 'train_separatormodel': True, 'postprocess': True}
+    TASKS = {'train_linemodel': True, 'eval_linemodel': True, 'train_separatormodel': True, 'postprocess': False}
     BEST_RUN = Path(r"F:\ml-parsing-project\table-parse-split\models\6_noSeparatorFeatures\model_best.pt")
 
     # Model parameters

@@ -10,8 +10,8 @@ import torch        # type : ignore
 
 import utils
 from dataloader import get_dataloader_lineLevel
-from model import TableLineModel, LOSS_ELEMENTS_COUNT
-from loss import getLossFunctions, calculateLoss
+from model import TableLineModel, LOSS_ELEMENTS_LINELEVEL_COUNT
+from loss import getLossFunctions, calculateLoss_lineLevel
 
 # Helper functions
 def __convert_01_array_to_visual(array, max_luminosity_features, invert=False, width=40) -> np.array:
@@ -23,12 +23,12 @@ def __convert_01_array_to_visual(array, max_luminosity_features, invert=False, w
 
 def eval_loop(dataloader, model, lossFunctions, max_luminosity_features, luminosity_filler, device, draw_images,path_annotations_raw, prediction_cutoff=0.5):
     batchCount = len(dataloader)
-    eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_COUNT,1), device=device, dtype=torch.int64)
+    eval_loss, correct, maxCorrect = torch.zeros(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device), torch.zeros(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.int64), torch.zeros(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.int64)
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Eval | Looping over batches'):
             # Compute prediction and loss
             preds = model(batch.features)
-            eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss(batch.targets, preds, lossFunctions, calculateCorrect=True)
+            eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, calculateCorrect=True)
             eval_loss += eval_loss_batch
             correct  += correct_batch
             maxCorrect  += maxCorrect_batch

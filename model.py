@@ -18,12 +18,14 @@ ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart']
 COL_VARIABLES = ['col_nearest_right_is_startlike_share']
 
 LOSS_CHARACTERISTICS = ['line', 'separator_count']
-LOSS_ELEMENTS = [f'{orientation}_{characteristic}' for orientation in ORIENTATIONS for characteristic in LOSS_CHARACTERISTICS]
-LOSS_ELEMENTS_COUNT = len(LOSS_ELEMENTS)
+LOSS_ELEMENTS_LINELEVEL = [f'{orientation}_{characteristic}' for orientation in ORIENTATIONS for characteristic in LOSS_CHARACTERISTICS]
+LOSS_ELEMENTS_LINELEVEL_COUNT = len(LOSS_ELEMENTS_LINELEVEL)
 
 # Constants | Separator Level
-FEATURE_TYPES_SEPARATORLEVEL = ORIENTATIONS + ['image']
+FEATURE_TYPES_SEPARATORLEVEL = ORIENTATIONS + ['image'] + ['proposedSeparators_row', 'proposedSeparators_col']
 COMMON_VARIABLES_SEPARATORLEVEL = ['text_between_separators_{}']
+LOSS_ELEMENTS_SEPARATORLEVEL = [f'{orientation}_separator' for orientation in ORIENTATIONS]
+LOSS_ELEMENTS_SEPARATORLEVEL_COUNT = len(LOSS_ELEMENTS_SEPARATORLEVEL)
 
 
 # Named tuples
@@ -34,7 +36,7 @@ Output = namedtuple('output', ORIENTATIONS)
 Sample = namedtuple('sample', ['features', 'targets', 'meta'])
 Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model', 'image_angle'])
 Features = namedtuple('features', FEATURE_TYPES)
-Targets = namedtuple('target', LOSS_ELEMENTS)
+Targets = namedtuple('target', LOSS_ELEMENTS_LINELEVEL)
 
 # Named tuples | Separator Level
 SeparatorTargets = namedtuple('target_separatorLevel', ORIENTATIONS)
@@ -88,8 +90,8 @@ class TableLineModel(nn.Module):
         
 
         # Line scanner
-        self.layer_ls_row = self.addLineScanner(orientation='rows')
-        self.layer_ls_col = self.addLineScanner(orientation='cols')
+        self.layer_ls_row = self.addLineScanner(orientation='row')
+        self.layer_ls_col = self.addLineScanner(orientation='col')
 
         # Convolution on image
         self.layer_conv_img = nn.Sequential(OrderedDict([
@@ -117,8 +119,8 @@ class TableLineModel(nn.Module):
         self.layer_logit = nn.Sigmoid()
     
     def addLineScanner(self, orientation):
-        kernel = (1, self.linescanner_parameters['size']) if orientation == 'rows' else (self.linescanner_parameters['size'], 1)
-        max_transformer = (None, 1) if orientation == 'rows' else (None, 1)
+        kernel = (1, self.linescanner_parameters['size']) if orientation == 'row' else (self.linescanner_parameters['size'], 1)
+        max_transformer = (None, 1) if orientation == 'row' else (1, None)
         sequence = nn.Sequential(OrderedDict([
             (f'conv1', nn.Conv2d(in_channels=1, out_channels=self.linescanner_parameters['channels'], kernel_size=kernel, stride=kernel, padding='valid', bias=False)),
             (f'norm', nn.BatchNorm2d(self.linescanner_parameters['channels'])),
@@ -187,7 +189,7 @@ class TableLineModel(nn.Module):
         row_inputs_global = features.row_global
 
         # Row | Linescanner
-        row_linescanner_values = self.layer_ls_row(features.image)
+        row_linescanner_values = self.layer_ls_row(features.image).squeeze(-1)
         row_linescanner_top5 = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX'], dim=2, sorted=True).values.view(1, -1, self.linescanner_parameters['keepTopX']*self.linescanner_parameters['channels']).broadcast_to((-1, features.image.shape[2], -1))
         
         # Row | Gather features
@@ -207,7 +209,7 @@ class TableLineModel(nn.Module):
         col_inputs_global = features.col_global
 
         # Col | Linescanner
-        col_linescanner_values = self.layer_ls_col(features.image)
+        col_linescanner_values = self.layer_ls_col(features.image).squeeze(-2)
         col_linescanner_top5 = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX'], dim=2, sorted=True).values.view(1, -1, self.linescanner_parameters['keepTopX']*self.linescanner_parameters['channels']).broadcast_to((-1, features.image.shape[3], -1))
 
         # Col | Gather features
@@ -230,8 +232,99 @@ class TableLineModel(nn.Module):
         # Output
         return Output(row=row_probs, col=col_probs)
 
-class TableSeparatorSegmentModel(nn.Module):
-    def __init__(self):
-        ...
+class TableSeparatorModel(nn.Module):
+    def __init__(self,
+                    linescanner_parameters={'size': 10, 'channels': 2, 'keepTopX_global': 5, 'keepTopX_local': 1},
+                    fc_parameters={'hidden_sizes': [8, 4]},
+                    info_variableCount={'common_orientationSpecific': 1},
+                    device='cuda'):
+        super().__init__()
+        # Parameters
+        self.device = device
+        self.linescanner_parameters = linescanner_parameters
+        self.fc_parameters = fc_parameters
+        self.fc_parameters['in_features'] = info_variableCount['common_orientationSpecific'] + linescanner_parameters['channels'] * (linescanner_parameters['keepTopX_global'] + linescanner_parameters['keepTopX_local'])
+
+        # Layers
+        # Layers | Line scanner
+        self.layer_ls_row = self.addLineScanner(orientation='row', params=self.linescanner_parameters)
+        self.layer_ls_col = self.addLineScanner(orientation='col', params=self.linescanner_parameters)
+
+        # Layers | Fully connected
+        self.layer_fc_row = self.addLinearLayer_depth3(params=fc_parameters)
+        self.layer_fc_col = self.addLinearLayer_depth3(params=fc_parameters)
+
+        # Logit Model
+        self.layer_logit = nn.Sigmoid()
+
+
+    def addLineScanner(self, orientation, params):
+        kernel = (1, params['size']) if orientation == 'row' else (params['size'], 1)
+        max_transformer = (None, 1)  if orientation == 'row' else (1, None)
+        sequence = nn.Sequential(OrderedDict([
+            (f'conv1', nn.Conv2d(in_channels=1, out_channels=params['channels'], kernel_size=kernel, stride=kernel, padding='valid', bias=False)),
+            (f'norm', nn.BatchNorm2d(params['channels'])),
+            (f'relu', nn.ReLU()),
+            (f'pool', nn.AdaptiveMaxPool2d(max_transformer))
+        ]))
+        return sequence
+    
+    def addLinearLayer_depth3(self, params:dict, activation=nn.ReLU):
+        hidden_sizes = params['hidden_sizes']
+        out_features = params.get('out_features') or 1
+        in_features = params['in_features']
+        sequence = nn.Sequential(OrderedDict([
+            (f'lin1_from{in_features}_to{hidden_sizes[0]}', nn.Linear(in_features=in_features, out_features=hidden_sizes[0])),
+            (f'relu_1', activation()),
+            (f'lin2_from{hidden_sizes[0]}_to{hidden_sizes[1]}', nn.Linear(in_features=hidden_sizes[0], out_features=hidden_sizes[1])),
+            (f'relu_2', activation()),
+            (f'lin3_from{hidden_sizes[1]}_to{out_features}', nn.Linear(in_features=hidden_sizes[1], out_features=out_features))
+        ]))
+        return sequence
+    
     def forward(self, features):
-        ...
+        # Convert tuple to namedtuple
+        if type(features) == type((0,)):
+            features = SeparatorFeatures(**{field: features[i] for i, field in enumerate(SeparatorFeatures._fields)})
+        
+        # Load features to GPU
+        features = SeparatorFeatures(**{field: features[i].to(self.device) for i, field in enumerate(SeparatorFeatures._fields)})
+        batch_size = 1
+
+
+        # Row
+        # Row | Info
+        row_inputs = features.row
+        count_separators_row = features.proposedSeparators_row.shape[1]
+
+        # Row | Linescanner
+        row_linescanner_values = self.layer_ls_row(features.image).squeeze(-1)
+        row_linescanner_top5_global = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX_global'], dim=2, sorted=True).values.view(batch_size, -1, self.linescanner_parameters['keepTopX_global']*self.linescanner_parameters['channels']).broadcast_to((-1, count_separators_row, -1))
+
+        row_linescanner_top1_local = torch.stack([torch.topk(row_linescanner_values[:, :, start:end+1], k=self.linescanner_parameters['keepTopX_local'], dim=2, sorted=True).values.view(batch_size, self.linescanner_parameters['keepTopX_local']*self.linescanner_parameters['channels']) for start, end in features.proposedSeparators_row.squeeze(0)], dim=1)
+
+        # Row | Fully connected
+        row_inputs = torch.cat([row_inputs, row_linescanner_top1_local, row_linescanner_top5_global], dim=2)
+        row_preds = self.layer_fc_row(row_inputs)
+
+        # Col
+        # Col | Info
+        col_inputs = features.col
+        count_separators_col = features.proposedSeparators_col.shape[1]
+
+        # Col | Linescanner
+        col_linescanner_values = self.layer_ls_col(features.image).squeeze(-2)
+        col_linescanner_top5_global = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX_global'], dim=2, sorted=True).values.view(batch_size, -1, self.linescanner_parameters['keepTopX_global']*self.linescanner_parameters['channels']).broadcast_to((-1, count_separators_col, -1))
+
+        col_linescanner_top1_local = torch.stack([torch.topk(col_linescanner_values[:, :, start:end+1], k=self.linescanner_parameters['keepTopX_local'], dim=2, sorted=True).values.view(batch_size, self.linescanner_parameters['keepTopX_local']*self.linescanner_parameters['channels']) for start, end in features.proposedSeparators_col.squeeze(0)], dim=1)
+
+        # Col | Fully connected
+        col_inputs = torch.cat([col_inputs, col_linescanner_top1_local, col_linescanner_top5_global], dim=2)
+        col_preds = self.layer_fc_col(col_inputs)
+
+        # Turn into probabilities
+        row_probs = self.layer_logit(row_preds)
+        col_probs = self.layer_logit(col_preds)
+
+        # Output
+        return Output(row=row_probs, col=col_probs)
