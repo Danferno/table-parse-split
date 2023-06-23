@@ -10,7 +10,7 @@ from torchvision.io import read_image, ImageReadMode
 
 
 from model import (Meta, Sample, Features, Targets,
-                   SeparatorTargets, SeparatorFeatures, SeparatorSample, 
+                   SeparatorTargets, SeparatorFeatures,
                    COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
 
 class LineDataset(Dataset):
@@ -102,6 +102,7 @@ class SeparatorDataset(Dataset):
         self.dir_features = dir_data_all / 'features_separatorLevel'
         self.dir_targets = dir_data_all / 'targets_separatorLevel'
         self.dir_predictions_line = dir_predictions_line or dir_data_all / 'predictions_lineLevel'
+        self.dir_meta = dir_data / 'meta'
         self.image_format = image_format
 
         # Get items
@@ -129,11 +130,17 @@ class SeparatorDataset(Dataset):
         # Generate paths for specific items
         tableName = self.items[idx]
         path_image = str(self.dir_images / f'{tableName}{self.image_format}')
+        path_meta = str(self.dir_meta / f'{self.items[idx]}.json')
         path_features = str(self.dir_features / f'{tableName}.json')
         path_targets = str(self.dir_targets / f'{tableName}.json')
         path_proposedSeparators = str(self.dir_predictions_line / f'{tableName}.json')
 
         # Load sample
+        # Load sample | Meta
+        with open(path_meta, 'r') as f:
+            metaData = json.load(f)
+        meta = Meta(path_image=path_image, **metaData)
+
         # Load sample | Targets
         with open(path_targets, 'r') as f:
             targetData = json.load(f)
@@ -160,7 +167,7 @@ class SeparatorDataset(Dataset):
         features = SeparatorFeatures(row=features_row, col=features_col, image=image, proposedSeparators_row=proposedSeparators_row, proposedSeparators_col=proposedSeparators_col)        
 
         # Return sample
-        sample = SeparatorSample(features=features, targets=targets)
+        sample = Sample(meta=meta, features=features, targets=targets)
         return sample
     
 def get_dataloader_lineLevel(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png') -> DataLoader:

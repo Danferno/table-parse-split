@@ -9,7 +9,7 @@ import torch
 import utils
 from model import TableLineModel, TableSeparatorModel, LOSS_ELEMENTS_LINELEVEL_COUNT, LOSS_ELEMENTS_SEPARATORLEVEL_COUNT
 from loss import defineLossFunctions_lineLevel, defineLossFunctions_separatorLevel, calculateLoss_lineLevel, calculateLoss_separatorLevel
-from dataloader import get_dataloader_lineLevel, get_dataloader_separatorLevel
+from dataloaders import get_dataloader_lineLevel, get_dataloader_separatorLevel
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 import matplotlib; matplotlib.use('Agg')
@@ -179,6 +179,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
 
     # Initialize elements
     model = TableSeparatorModel().to(device)
+    model.train()
 
     dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
     dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, shuffle=False, device=device)

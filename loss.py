@@ -91,6 +91,12 @@ def getLossFunctions(path_model_file):
                      'col_line': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['col']), 'col_separator_count': LogisticLoss(limit_upper=lossFunctionInfo['limit_upper'])} 
     return lossFunctions
 
+def getLossFunctions_separatorLevel(path_model_file):
+    lossFunctionInfo = torch.load(path_model_file.parent / LOSS_FUNCTIONS_INFO_FILENAME)   
+    lossFunctions = {'row_separator': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['row']),
+                     'col_separator': WeightedBinaryCrossEntropyLoss(weights=lossFunctionInfo['classWeights']['col'])} 
+    return lossFunctions
+
 # Loss function | Define weighted loss function
 def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
     loss = torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.float32)

@@ -5,6 +5,7 @@ import pandas as pd
 # Constants
 COLOR_CORRECT = (0, 255, 0, int(0.25*255))
 COLOR_WRONG = (255, 0, 0, int(0.25*255))
+COLOR_MIDDLE = (128, 128, 0, int(0.25*255))
 
 # Functions
 def replaceDir(path):

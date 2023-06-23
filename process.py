@@ -17,7 +17,7 @@ from PIL import Image, ImageFont, ImageDraw
 
 import utils
 from model import TableLineModel
-from dataloader import get_dataloader_lineLevel
+from dataloaders import get_dataloader_lineLevel
 
 # Constants
 COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
@@ -145,6 +145,9 @@ def generate_featuresAndTargets_separatorLevel(path_best_model_line, path_data, 
             separators = json.load(f)
         separators_row = separators['row_separator_predictions']
         separators_col = separators['col_separator_predictions']
+
+        if min([len(separator) for separator in separators.values()]) == 0:
+            continue
         
         separators_midpoints_row = [sum(separator)//2 for separator in separators_row]
         separators_midpoints_col = [sum(separator)//2 for separator in separators_col]

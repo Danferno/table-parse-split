@@ -41,7 +41,6 @@ Targets = namedtuple('target', LOSS_ELEMENTS_LINELEVEL)
 # Named tuples | Separator Level
 SeparatorTargets = namedtuple('target_separatorLevel', ORIENTATIONS)
 SeparatorFeatures = namedtuple('feature_separatorLevel', FEATURE_TYPES_SEPARATORLEVEL)
-SeparatorSample = namedtuple('sample_separatorLevel', ['features', 'targets'])
 
 
 # Models
@@ -290,7 +289,6 @@ class TableSeparatorModel(nn.Module):
         # Load features to GPU
         features = SeparatorFeatures(**{field: features[i].to(self.device) for i, field in enumerate(SeparatorFeatures._fields)})
         batch_size = 1
-
 
         # Row
         # Row | Info
