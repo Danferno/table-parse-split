@@ -1,7 +1,9 @@
 # Imports
 from collections import namedtuple, OrderedDict
 from torch import nn
+import torch.nn.functional as F
 import torch
+from einops.layers.torch import Rearrange
 # from torch_scatter import segment_csr
 
 # Constants
@@ -233,21 +235,33 @@ class TableLineModel(nn.Module):
 
 class TableSeparatorModel(nn.Module):
     def __init__(self,
-                    linescanner_parameters={'size': 10, 'channels': 2, 'keepTopX_global': 3, 'keepTopX_local': 1},
-                    fc_parameters={'hidden_sizes': [4, 2]},
+                    linescanner_parameters={'size': 10, 'channels': 2, 'keepTopX_local': 3, 'keepTopX_global': 3},
+                    areascanner_parameters={'size': [8, 8], 'channels': 5, 'keepTopX_local': 3},
+                    fc_parameters={'hidden_sizes': [16, 8]},
                     info_variableCount={'common_orientationSpecific': 1},
                     device='cuda'):
         super().__init__()
         # Parameters
         self.device = device
         self.linescanner_parameters = linescanner_parameters
+        self.areascanner_parameters = areascanner_parameters
         self.fc_parameters = fc_parameters
-        self.fc_parameters['in_features'] = info_variableCount['common_orientationSpecific'] + linescanner_parameters['channels'] * (linescanner_parameters['keepTopX_global'] + linescanner_parameters['keepTopX_local'])
+        self.fc_parameters['in_features'] = info_variableCount['common_orientationSpecific'] + self.linescanner_parameters['keepTopX_local'] + self.linescanner_parameters['keepTopX_global'] + self.areascanner_parameters['keepTopX_local']*2
 
         # Layers
+        # Layers | Area scanner
+        self.layer_areascanner = self.addAreaScanner(params=self.areascanner_parameters)
+
         # Layers | Line scanner
         self.layer_ls_row = self.addLineScanner(orientation='row', params=self.linescanner_parameters)
         self.layer_ls_col = self.addLineScanner(orientation='col', params=self.linescanner_parameters)
+
+        # Layers | Rearrangers
+        self.rearrange_row = Rearrange(pattern='b c h w -> b h (c w)')
+        self.rearrange_col = Rearrange(pattern='b c h w -> b w (c h)')
+        self.rearrange_sep = Rearrange(pattern='b s l o -> b s (l o)')      # batch sep lines options > batch sep lines-options
+        self.rearrange_ls = Rearrange(pattern='b c l -> b l c')
+
 
         # Layers | Fully connected
         self.layer_fc_row = self.addLinearLayer_depth3(params=fc_parameters)
@@ -256,14 +270,22 @@ class TableSeparatorModel(nn.Module):
         # Logit Model
         self.layer_logit = nn.Sigmoid()
 
+    def addAreaScanner(self, params):
+        kernel = params['size']
+        sequence= nn.Sequential(OrderedDict([
+            (f'conv1', nn.Conv2d(in_channels=1, out_channels=params['channels'], kernel_size=kernel, padding='same', padding_mode='replicate', bias=False)),
+            (f'relu', nn.ReLU()),
+            (f'norm', nn.BatchNorm2d(params['channels'])),
+        ]))
+        return sequence
 
     def addLineScanner(self, orientation, params):
         kernel = (1, params['size']) if orientation == 'row' else (params['size'], 1)
         max_transformer = (None, 1)  if orientation == 'row' else (1, None)
         sequence = nn.Sequential(OrderedDict([
             (f'conv1', nn.Conv2d(in_channels=1, out_channels=params['channels'], kernel_size=kernel, stride=kernel, padding='valid', bias=False)),
-            (f'norm', nn.BatchNorm2d(params['channels'])),
             (f'relu', nn.ReLU()),
+            (f'norm', nn.BatchNorm2d(params['channels'])),
             (f'pool', nn.AdaptiveMaxPool2d(max_transformer))
         ]))
         return sequence
@@ -290,34 +312,88 @@ class TableSeparatorModel(nn.Module):
         features = SeparatorFeatures(**{field: features[i].to(self.device) for i, field in enumerate(SeparatorFeatures._fields)})
         batch_size = 1
 
+        # Scanners
+        area_scanner_values = self.layer_areascanner(features.image)
+        row_linescanner_values = self.rearrange_ls(self.layer_ls_row(features.image).squeeze(-1))
+        col_linescanner_values = self.rearrange_ls(self.layer_ls_col(features.image).squeeze(-2))
+
         # Row
         # Row | Info
-        row_inputs = features.row
+        row_inputs_precalculated = features.row
         count_separators_row = features.proposedSeparators_row.shape[1]
 
-        # Row | Linescanner
-        row_linescanner_values = self.layer_ls_row(features.image).squeeze(-1)
-        row_linescanner_top5_global = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX_global'], dim=2, sorted=True).values.view(batch_size, -1, self.linescanner_parameters['keepTopX_global']*self.linescanner_parameters['channels']).broadcast_to((-1, count_separators_row, -1))
+        # Row | TopX of area scanner
+        area_scanner_values_row = self.rearrange_row(area_scanner_values)
+        area_scanner_topX_byRow = torch.topk(area_scanner_values_row, k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
+        row_areascanner_before = torch.topk(
+                                    self.rearrange_sep(
+                                        torch.stack(
+                                            [area_scanner_topX_byRow[:, start-self.areascanner_parameters['size'][0]:start, :] for start, _ in features.proposedSeparators_row.squeeze(0)]
+                                        , dim=1)
+                                    ),
+                                 k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
+        row_areascanner_after = torch.topk(
+                                    self.rearrange_sep(
+                                        torch.stack(
+                                            [area_scanner_topX_byRow[:, end+1:end+self.areascanner_parameters['size'][0]+1, :] for _, end in features.proposedSeparators_row.squeeze(0)]
+                                        , dim=1)
+                                    ),
+                                k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
 
-        row_linescanner_top1_local = torch.stack([torch.topk(row_linescanner_values[:, :, start:end+1], k=self.linescanner_parameters['keepTopX_local'], dim=2, sorted=True).values.view(batch_size, self.linescanner_parameters['keepTopX_local']*self.linescanner_parameters['channels']) for start, end in features.proposedSeparators_row.squeeze(0)], dim=1)
+        # Row | TopX of line scanner
+        longestSeparator = torch.max(torch.diff(features.proposedSeparators_row.squeeze(0))+1)
+        row_linescanner_topX_local = torch.topk(
+                                        self.rearrange_sep(
+                                            torch.stack([F.pad(row_linescanner_values[:, start:end+1, :], pad=(0, 0, 0, longestSeparator-(end+1-start), 0, 0), value=float('-inf')) for start, end in features.proposedSeparators_row.squeeze(0)], dim=1)
+                                        ),
+                                    k=self.linescanner_parameters['keepTopX_local'], dim=-1).values
+        row_image_features = torch.cat([row_areascanner_before, row_areascanner_after, row_linescanner_topX_local], dim=-1)
+
+        # Row | Global linescanner        
+        row_linescanner_topX_global = torch.topk(row_linescanner_values.reshape(batch_size, -1), k=self.linescanner_parameters['keepTopX_global'], sorted=True).values.broadcast_to((batch_size, count_separators_row, -1))
 
         # Row | Fully connected
-        row_inputs = torch.cat([row_inputs, row_linescanner_top1_local, row_linescanner_top5_global], dim=2)
+        row_inputs = torch.cat([row_inputs_precalculated, row_image_features, row_linescanner_topX_global], dim=2)
         row_preds = self.layer_fc_row(row_inputs)
+
 
         # Col
         # Col | Info
         col_inputs = features.col
         count_separators_col = features.proposedSeparators_col.shape[1]
 
-        # Col | Linescanner
-        col_linescanner_values = self.layer_ls_col(features.image).squeeze(-2)
-        col_linescanner_top5_global = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX_global'], dim=2, sorted=True).values.view(batch_size, -1, self.linescanner_parameters['keepTopX_global']*self.linescanner_parameters['channels']).broadcast_to((-1, count_separators_col, -1))
+        # Col | TopX of area scanner
+        area_scanner_values_col = self.rearrange_col(area_scanner_values)
+        area_scanner_topX_byCol = torch.topk(area_scanner_values_col, k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
+        col_areascanner_before = torch.topk(
+                                    self.rearrange_sep(
+                                        torch.stack(
+                                            [area_scanner_topX_byCol[:, start-self.areascanner_parameters['size'][0]:start, :] for start, _ in features.proposedSeparators_col.squeeze(0)]
+                                        , dim=1)
+                                    ),
+                                 k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
+        col_areascanner_after = torch.topk(
+                                    self.rearrange_sep(
+                                        torch.stack(
+                                            [area_scanner_topX_byCol[:, end+1:end+self.areascanner_parameters['size'][0]+1, :] for _, end in features.proposedSeparators_col.squeeze(0)]
+                                        , dim=1)
+                                    ),
+                                k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
 
-        col_linescanner_top1_local = torch.stack([torch.topk(col_linescanner_values[:, :, start:end+1], k=self.linescanner_parameters['keepTopX_local'], dim=2, sorted=True).values.view(batch_size, self.linescanner_parameters['keepTopX_local']*self.linescanner_parameters['channels']) for start, end in features.proposedSeparators_col.squeeze(0)], dim=1)
+        # Col | TopX of line scanner
+        longestSeparator = torch.max(torch.diff(features.proposedSeparators_col.squeeze(0))+1)
+        col_linescanner_topX_local = torch.topk(
+                                        self.rearrange_sep(
+                                            torch.stack([F.pad(col_linescanner_values[:, start:end+1, :], pad=(0, 0, 0, longestSeparator-(end+1-start), 0, 0), value=float('-inf')) for start, end in features.proposedSeparators_col.squeeze(0)], dim=1)
+                                        ),
+                                    k=self.linescanner_parameters['keepTopX_local'], dim=-1).values
+        col_image_features = torch.cat([col_areascanner_before, col_areascanner_after, col_linescanner_topX_local], dim=-1)
+
+        # Col | Global linescanner
+        col_linescanner_topX_global = torch.topk(col_linescanner_values.reshape(batch_size, -1), k=self.linescanner_parameters['keepTopX_global'], sorted=True).values.broadcast_to((batch_size, count_separators_col, -1))
 
         # Col | Fully connected
-        col_inputs = torch.cat([col_inputs, col_linescanner_top1_local, col_linescanner_top5_global], dim=2)
+        col_inputs = torch.cat([col_inputs, col_image_features, col_linescanner_topX_global], dim=2)
         col_preds = self.layer_fc_col(col_inputs)
 
         # Turn into probabilities
