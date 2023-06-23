@@ -11,17 +11,17 @@ def run():
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
-    RUN_NAME = '7_separatorModelAdded'
+    RUN_NAME = '8_lineScannerAdapted'
     PADDING = 40
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-    TASKS = {'train_linemodel': False, 'eval_linemodel': False, 'train_separatormodel': False, 'eval_separatormodel':True, 'postprocess': False}
+    TASKS = {'train_linemodel': False, 'eval_linemodel': False, 'train_separatormodel': True, 'eval_separatormodel':True, 'postprocess': False}
     BEST_RUN_LINE = Path(r"F:\ml-parsing-project\table-parse-split\models\7_separatorModelAdded_lineLevel\model_best.pt")
     BEST_RUN_SEPARATOR = Path(r"F:\ml-parsing-project\table-parse-split\models\7_separatorModelAdded_separatorLevel\model_best.pt")
 
     # Model parameters
     EPOCHS_LINELEVEL = 50
-    EPOCHS_SEPARATORLEVEL = 50
+    EPOCHS_SEPARATORLEVEL = 20
     
     MAX_LR_LINELEVEL = 0.08
     MAX_LR_SEPARATORLEVEL = 0.2
