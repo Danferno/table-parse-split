@@ -23,7 +23,7 @@ def run():
     EPOCHS_LINELEVEL = 50
     MAX_LR_LINELEVEL = 0.08
 
-    EPOCHS_SEPARATORLEVEL = 2
+    EPOCHS_SEPARATORLEVEL = 50
     MAX_LR_SEPARATORLEVEL = 0.2
 
     # Derived constants
@@ -54,7 +54,7 @@ def run():
     if TASKS['train_separatormodel']:
         path_best_model_line = BEST_RUN_LINE if not TASKS['train_linemodel'] else path_model_lineLevel / 'model_best.pt'
         print(path_best_model_line)
-        # generate_featuresAndTargets_separatorLevel(path_best_model_line=path_best_model_line, path_data=path_data / 'all', path_words=path_words, replace_dirs=True, draw_images=True)
+        generate_featuresAndTargets_separatorLevel(path_best_model_line=path_best_model_line, path_data=path_data / 'all', path_words=path_words, replace_dirs=True, draw_images=True)
         train_separatorLevel(profile=False, epochs=EPOCHS_SEPARATORLEVEL, max_lr=MAX_LR_SEPARATORLEVEL, 
                 path_data_train=path_data / 'train', path_data_val=path_data / 'val',
                 path_model=path_model_separatorLevel, device=DEVICE, replace_dirs=True)
