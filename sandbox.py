@@ -66,8 +66,10 @@ def run():
 
     if TASKS['postprocess']:
         path_best_model_separator = BEST_RUN_SEPARATOR if not TASKS['train_separatormodel'] else path_model_separatorLevel / 'model_best.pt'
+        # predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
+        #             path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_images=True, out_labels_rows=False)
         predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
-                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, draw_images=True)
+                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_images=True, out_labels_rows=True)
 
 if __name__ == '__main__':
     run()

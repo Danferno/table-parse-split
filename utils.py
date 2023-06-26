@@ -21,6 +21,8 @@ def makeDirs(path, replaceDirs='warn'):
                 replaceDir(path)
             else:
                 raise InterruptedError(f'User was not okay with removing {path}')
+        elif replaceDirs == 'overwrite':
+            pass
         elif replaceDirs:
             replaceDir(path)
         else:

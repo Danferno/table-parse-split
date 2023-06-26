@@ -11,6 +11,7 @@ import cv2 as cv
 from tqdm import tqdm
 import json
 import os
+from lxml import etree
 
 from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
@@ -26,6 +27,7 @@ OPACITY_ORIGINAL = int(0.15*255)
 
 # Helper functions
 def preds_to_separators(predArray, threshold=0.8, setToMidpoint=False, addPaddingSeparators=True, paddingSeparator=None):
+    ''' Left: first one (= inclusive), right: first zero (= exclusive)'''
     # Tensor > np.array on cpu
     if isinstance(predArray, torch.Tensor):
         predArray = predArray.cpu().numpy().squeeze()
@@ -52,15 +54,15 @@ def parse_separators(separatorArray:list, padding, size, setToMidpoint=True):
         # Set to midpoint
         if setToMidpoint:
             separator_means = np.floor(separatorArray.mean(axis=1)).astype(np.int32)
-            separators = np.stack([separator_means, separator_means+1], axis=1)
+            separatorArray = np.stack([separator_means, separator_means+1], axis=1)
         
         # Add padding separator
-        separators = np.concatenate((np.array([[padding-1, padding]]), separators, np.array([[size-padding, size-padding+1]])), axis=0)
+        separatorArray = np.concatenate((np.array([[padding-1, padding]]), separatorArray, np.array([[size-padding, size-padding+1]])), axis=0)
 
-    except np.AxisError:
-        separators = np.concatenate((np.array([[padding-1, padding]]), np.array([[size-padding, size-padding+1]])), axis=0)
+    except (np.AxisError, ValueError):
+        separatorArray = np.concatenate((np.array([[padding-1, padding]]), np.array([[size-padding, size-padding+1]])), axis=0)
 
-    return separators
+    return separatorArray
 
 def get_first_non_null_values(df):
     # Get first value
@@ -78,7 +80,6 @@ def get_first_non_null_values(df):
     if header_candidates.shape == ():
         header_candidates = np.expand_dims(header_candidates, 0)
     return header_candidates
-
 def number_duplicates(l):
     counter = Counter()
 
@@ -97,6 +98,18 @@ def scale_cell_to_dpi(cell, dpi_start, dpi_target):
     for key in ['x0', 'x1', 'y0', 'y1']:
         cell[key] = int((cell[key]*dpi_target/dpi_start).round(0))
     return cell
+
+def arrayToXml(array:list, xmlRoot:etree.Element, label:str, orientation:str, tableBbox:np.array):
+    for start, end in array:
+        xml_obj = etree.SubElement(xmlRoot, 'object')
+        xml_label = etree.SubElement(xml_obj, 'name'); xml_label.text = label
+
+        xml_bbox = etree.SubElement(xml_obj, 'bndbox')
+        ymin = etree.SubElement(xml_bbox, 'ymin'); ymin.text = str(start)     if orientation == 'row' else tableBbox['ymin']
+        ymax = etree.SubElement(xml_bbox, 'ymax'); ymax.text = str(end)       if orientation == 'row' else tableBbox['ymax']
+        xmin = etree.SubElement(xml_bbox, 'xmin'); xmin.text = str(start)     if orientation == 'col' else tableBbox['xmin']
+        xmax = etree.SubElement(xml_bbox, 'xmax'); xmax.text = str(end)       if orientation == 'col' else tableBbox['xmax']
+
 
 # Function
 def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cuda', replace_dirs='warn', draw_images=False, padding=40):
@@ -296,18 +309,22 @@ def generate_featuresAndTargets_separatorLevel(path_best_model_line, path_data, 
             img.save(path_annotated_images / f'{tableName}.png')
 
 
-def predict_and_process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, draw_text_scale=1, truth_threshold=0.5):
+def predict_and_process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', path_processed=None, padding=40, draw_text_scale=1, truth_threshold=0.5,
+                        out_data=True, out_images=False, out_labels_separators=False, out_labels_rows=True):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data); path_words = Path(path_words); path_pdfs = Path(path_pdfs)
 
     # Make folders
     path_processed = path_processed or path_model_file.parent / 'processed'
-    path_processed_data = path_processed / 'data'
-    path_processed_images = path_processed / 'images'
+    path_processed_data         = path_processed / 'data'
+    path_processed_images       = path_processed / 'annotated_data'
+    path_processed_labels_rows  = path_processed / 'labels_rows'
     utils.makeDirs(path_processed_data, replaceDirs=replace_dirs)
 
-    if draw_images:       
+    if out_images:       
         utils.makeDirs(path_processed_images, replaceDirs=replace_dirs)
+    if out_labels_rows:
+        utils.makeDirs(path_processed_labels_rows, replaceDirs=replace_dirs)
 
     # Load model
     model = TableSeparatorModel().to(device)
@@ -331,6 +348,7 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
             # Convert to data
             batch_size = dataloader.batch_size
             for sampleNumber in range(batch_size):
+
                 # Words
                 # Words | Parse sample name
                 image_path = Path(batch.meta.path_image[sampleNumber])
@@ -372,12 +390,16 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                 # Cells | Convert predictions to boundaries
                 separators_row = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_row[sampleNumber]) if preds.row[sampleNumber][idx] >= truth_threshold])
                 separators_col = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_col[sampleNumber]) if preds.col[sampleNumber][idx] >= truth_threshold])
-                separators_row = parse_separators(separatorArray=separators_row, padding=padding, size=int(img.height//scale_factor), setToMidpoint=True)
-                separators_col = parse_separators(separatorArray=separators_col, padding=padding, size=int(img.width//scale_factor), setToMidpoint=True)
+                
+                separators_row_wide = parse_separators(separatorArray=separators_row, padding=padding, size=int(img.height//scale_factor), setToMidpoint=False)
+                separators_col_wide = parse_separators(separatorArray=separators_col, padding=padding, size=int(img.width//scale_factor), setToMidpoint=False)
+
+                separators_row_mid = parse_separators(separatorArray=separators_row, padding=padding, size=int(img.height//scale_factor), setToMidpoint=True)
+                separators_col_mid = parse_separators(separatorArray=separators_col, padding=padding, size=int(img.width//scale_factor), setToMidpoint=True)
 
                 # Cells | Convert boundaries to cells
-                cells = [dict(x0=separators_col[c][1]+1, y0=separators_row[r][1]+1, x1=separators_col[c+1][0], y1=separators_row[r+1][0], row=r, col=c)
-                            for r in range(len(separators_row)-1) for c in range(len(separators_col)-1)]
+                cells = [dict(x0=separators_col_mid[c][1]+1, y0=separators_row_mid[r][1]+1, x1=separators_col_mid[c+1][0], y1=separators_row_mid[r+1][0], row=r, col=c)
+                            for r in range(len(separators_row_mid)-1) for c in range(len(separators_col_mid)-1)]
                 cells = [scale_cell_to_dpi(cell, dpi_start=dpi_model, dpi_target=dpi_words) for cell in cells]
 
                 # Data 
@@ -409,62 +431,63 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                         cell['text'] = ' '.join(wordsDf.loc[overlap, 'text'])
 
                 # Data | Convert to dataframe
-                if cells:
-                    df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
-                    df = df.dropna(axis='columns', how='all').dropna(axis='index', how='all').reset_index(drop=True)
-                else:
-                    df = pd.DataFrame()
+                if out_data:
+                    if cells:
+                        df = pd.DataFrame.from_records(cells)[['row', 'col', 'text']].pivot(index='row', columns='col', values='text').replace(' ', pd.NA).replace('', pd.NA)       #.convert_dtypes(dtype_backend='pyarrow')
+                        df = df.dropna(axis='columns', how='all').dropna(axis='index', how='all').reset_index(drop=True)
+                    else:
+                        df = pd.DataFrame()
 
-                if len(df):
-                    # Data | Clean
-                    # Data | Clean | Combine "(" ")" columns
-                    uniques = {col: set(df[col].unique()) for col in df.columns}
-                    onlyParenthesis_open =  [col for col, unique in uniques.items() if unique == set([pd.NA, '('])]
-                    onlyParenthesis_close = [col for col, unique in uniques.items() if unique == set([pd.NA, ')'])]
+                    if len(df):
+                        # Data | Clean
+                        # Data | Clean | Combine "(" ")" columns
+                        uniques = {col: set(df[col].unique()) for col in df.columns}
+                        onlyParenthesis_open =  [col for col, unique in uniques.items() if unique == set([pd.NA, '('])]
+                        onlyParenthesis_close = [col for col, unique in uniques.items() if unique == set([pd.NA, ')'])]
 
-                    for col in onlyParenthesis_open:
-                        parenthesis_colIndex = df.columns.tolist().index(col)
-                        if parenthesis_colIndex == (len(df.columns) - 1):           # Drop if last column only contains (
-                            df = df.drop(columns=[col])
-                        else:                                                       # Otherwise add to next column
-                            target_col = df.columns[parenthesis_colIndex+1]
-                            df[target_col] = df[target_col] + df[col]               
-                    for col in onlyParenthesis_close:
-                        parenthesis_colIndex = df.columns.tolist().index(col)
-                        if parenthesis_colIndex == 0:                               # Drop if first column only contains )
-                            df = df.drop(columns=[col])
-                        else:                                                       # Otherwise add to previous column
-                            target_col = df.columns[parenthesis_colIndex-1]
-                            df[target_col] = df[target_col] + df[col]               
-                            df = df.drop(columns=[col])
+                        for col in onlyParenthesis_open:
+                            parenthesis_colIndex = df.columns.tolist().index(col)
+                            if parenthesis_colIndex == (len(df.columns) - 1):           # Drop if last column only contains (
+                                df = df.drop(columns=[col])
+                            else:                                                       # Otherwise add to next column
+                                target_col = df.columns[parenthesis_colIndex+1]
+                                df[target_col] = df[target_col] + df[col]               
+                        for col in onlyParenthesis_close:
+                            parenthesis_colIndex = df.columns.tolist().index(col)
+                            if parenthesis_colIndex == 0:                               # Drop if first column only contains )
+                                df = df.drop(columns=[col])
+                            else:                                                       # Otherwise add to previous column
+                                target_col = df.columns[parenthesis_colIndex-1]
+                                df[target_col] = df[target_col] + df[col]               
+                                df = df.drop(columns=[col])
 
-                    # Data | Clean | If last column only contains 1 or |, it is probably an OCR error
-                    ocr_mistakes_verticalLine = set([pd.NA, '1', '|'])
-                    if len(set(df.iloc[:, -1].unique()).difference(ocr_mistakes_verticalLine)) == 0:
-                        df = df.drop(df.columns[-1],axis=1)
+                        # Data | Clean | If last column only contains 1 or |, it is probably an OCR error
+                        ocr_mistakes_verticalLine = set([pd.NA, '1', '|'])
+                        if len(set(df.iloc[:, -1].unique()).difference(ocr_mistakes_verticalLine)) == 0:
+                            df = df.drop(df.columns[-1],axis=1)
 
-                    # Data | Clean | Column names
-                    # Data | Clean | Column names | First column is probably label column (if longest string in columns)
-                    longestStringLengths = {col: df.loc[1:, col].str.len().max() for col in df.columns}
-                    longestString = max(longestStringLengths, key=longestStringLengths.get)
-                    if longestString == 0:
-                        df.loc[0, longestString] = 'Labels'
+                        # Data | Clean | Column names
+                        # Data | Clean | Column names | First column is probably label column (if longest string in columns)
+                        longestStringLengths = {col: df.loc[1:, col].str.len().max() for col in df.columns}
+                        longestString = max(longestStringLengths, key=longestStringLengths.get)
+                        if longestString == 0:
+                            df.loc[0, longestString] = 'Labels'
 
-                    # Data | Clean | Column names | Replace column names by first non missing element in first five rows
-                    df.columns = get_first_non_null_values(df)
-                    df.columns = list(number_duplicates(df.columns))
-                    df = df.drop(index=0).reset_index(drop=True)
-                    
-                    # Data | Clean | Drop rows with only label and code information
-                    valueColumns = [col for col in df.columns if (col is pd.NA) or ((col not in ['Labels']) and not (col.startswith('Codes')))]
-                    df = df.dropna(axis='index', subset=valueColumns, how='all').reset_index(drop=True)
+                        # Data | Clean | Column names | Replace column names by first non missing element in first five rows
+                        df.columns = get_first_non_null_values(df)
+                        df.columns = list(number_duplicates(df.columns))
+                        df = df.drop(index=0).reset_index(drop=True)
+                        
+                        # Data | Clean | Drop rows with only label and code information
+                        valueColumns = [col for col in df.columns if (col is pd.NA) or ((col not in ['Labels']) and not (col.startswith('Codes')))]
+                        df = df.dropna(axis='index', subset=valueColumns, how='all').reset_index(drop=True)
 
-                # Data | Save
-                df.to_parquet(path_processed_data / f'{name_full}.pq')
+                    # Data | Save
+                    df.to_parquet(path_processed_data / f'{name_full}.pq')
                 
                 # Visualise
                 # Visualise | Cell annotations
-                if draw_images:
+                if out_images:
                     table = Image.new('RGBA', img.size, (255,255,255,255))
                     img_annot = ImageDraw.Draw(table)
                     for cell in cells:
@@ -480,6 +503,40 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                     bg.putalpha(OPACITY_ORIGINAL)
                     tableImage = Image.alpha_composite(table, bg).convert('RGB')
                     tableImage.save(path_processed_images / f'{name_full}.png')
+
+                # Labels
+                # Labels | Separators
+                if out_labels_separators:
+                    raise Exception('Generating separator labels not yet implemented')
+                
+                # Labels | Rows, columns and separators
+                if out_labels_rows:
+                    rows = np.column_stack((separators_row_wide[:-1, 1], separators_row_wide[1:, 0]))
+                    cols = np.column_stack((separators_col_wide[:-1, 1], separators_col_wide[1:, 0]))
+                    tableBbox = dict(xmin=cols.min(), xmax=cols.max(), ymin=rows.min(), ymax=rows.max())
+                    tableBbox = {key: str(value) for key, value in tableBbox.items()}
+
+                    # Generate general xml
+                    xml = etree.Element('annotation')
+                    xml_size = etree.SubElement(xml, 'size')
+                    xml_width  = etree.SubElement(xml_size, 'width');   xml_width.text = str(int( img.width // scale_factor))
+                    xml_height = etree.SubElement(xml_size, 'height'); xml_height.text = str(int(img.height // scale_factor))
+                    
+                    xml_table = etree.SubElement(xml, 'object')
+                    xml_label = etree.SubElement(xml_table, 'name'); xml_label.text = 'table'
+                    xml_table_bbox = etree.SubElement(xml_table, 'bndbox')
+                    for edge in tableBbox:
+                        _ = etree.SubElement(xml_table_bbox, edge)
+                        _.text = str(tableBbox[edge])
+                    
+
+                    # Generate row/column xml
+                    arrayToXml(array=rows, xmlRoot=xml, label='table row', orientation='row', tableBbox=tableBbox)
+                    arrayToXml(array=cols, xmlRoot=xml, label='table column', orientation='col', tableBbox=tableBbox)
+
+                    # Save
+                    tree = etree.ElementTree(xml)
+                    tree.write(path_processed_labels_rows / f'{name_full}.xml', pretty_print=True, xml_declaration=False, encoding='utf-8')
 
 
 # Individual file run for testing
