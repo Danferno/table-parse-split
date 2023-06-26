@@ -16,12 +16,13 @@ from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
 
 import utils
-from model import TableLineModel
-from dataloaders import get_dataloader_lineLevel
+from model import TableLineModel, TableSeparatorModel
+import dataloaders
 
 # Constants
 COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
 COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
+OPACITY_ORIGINAL = int(0.15*255)
 
 # Helper functions
 def preds_to_separators(predArray, threshold=0.8, setToMidpoint=False, addPaddingSeparators=True, paddingSeparator=None):
@@ -45,18 +46,46 @@ def preds_to_separators(predArray, threshold=0.8, setToMidpoint=False, addPaddin
         separators = np.stack([separator_means, separator_means+1], axis=1)
 
     return separators
+
+def parse_separators(separatorArray:list, padding, size, setToMidpoint=True):
+    try:   
+        # Set to midpoint
+        if setToMidpoint:
+            separator_means = np.floor(separatorArray.mean(axis=1)).astype(np.int32)
+            separators = np.stack([separator_means, separator_means+1], axis=1)
+        
+        # Add padding separator
+        separators = np.concatenate((np.array([[padding-1, padding]]), separators, np.array([[size-padding, size-padding+1]])), axis=0)
+
+    except np.AxisError:
+        separators = np.concatenate((np.array([[padding-1, padding]]), np.array([[size-padding, size-padding+1]])), axis=0)
+
+    return separators
+
 def get_first_non_null_values(df):
-    header_candidates = df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].fillna('empty').values.squeeze()
+    # Get first value
+    header_candidates = df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].copy()
+
+    # Replace empty values by 'empty'
+    header_candidates = header_candidates.fillna('empty')
+
+    # Replace numeric values by "numeric"
+    numericCols = [col for col in header_candidates.columns if header_candidates[col].replace(',', '', regex=True).str.isnumeric().all()]
+    header_candidates.loc[:, numericCols] = 'numeric'
+
+    # Get values    
+    header_candidates = header_candidates.values.squeeze()
     if header_candidates.shape == ():
         header_candidates = np.expand_dims(header_candidates, 0)
     return header_candidates
+
 def number_duplicates(l):
     counter = Counter()
 
     for v in l:
         counter[v] += 1
         if counter[v]>1:
-            yield v+f'-{counter[v]}'
+            yield v+f'_{counter[v]}'
         else:
             yield v
 def boxes_intersect(box, box_target):
@@ -86,7 +115,7 @@ def predict_lineLevel(path_model_file, path_data, path_predictions_line=None, de
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = get_dataloader_lineLevel(dir_data=path_data)
+    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data)
     
     # Loop over batches
     batch_size = dataloader.batch_size
@@ -267,7 +296,7 @@ def generate_featuresAndTargets_separatorLevel(path_best_model_line, path_data, 
             img.save(path_annotated_images / f'{tableName}.png')
 
 
-def predict_and_process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, draw_text_scale=1):
+def predict_and_process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', draw_images=False, path_processed=None, padding=40, draw_text_scale=1, truth_threshold=0.5):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data); path_words = Path(path_words); path_pdfs = Path(path_pdfs)
 
@@ -281,16 +310,15 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
         utils.makeDirs(path_processed_images, replaceDirs=replace_dirs)
 
     # Load model
-    model = TableLineModel().to(device)
+    model = TableSeparatorModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = get_dataloader_lineLevel(dir_data=path_data)
+    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data)
 
     # Load OCR reader
     reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
 
     # Padding separator
-    paddingSeparator = np.array([[0, padding]])
     TableRect = namedtuple('tableRect', field_names=['x0', 'x1', 'y0', 'y1'])
     FONT_TEXT = ImageFont.truetype('arial.ttf', size=int(26*draw_text_scale))
     FONT_BIG = ImageFont.truetype('arial.ttf', size=int(48*draw_text_scale))
@@ -328,16 +356,6 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                 wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] = (wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] * (dpi_pdf / dpi_words))
                 textSource = 'ocr-based' if len(wordsDf.query('ocrLabel == "pdf"')) == 0 else 'pdf-based'
 
-                # Cells
-                # Cells | Convert predictions to boundaries
-                separators_row = preds_to_separators(predArray=preds.row[sampleNumber], paddingSeparator=paddingSeparator, setToMidpoint=True)
-                separators_col = preds_to_separators(predArray=preds.col[sampleNumber], paddingSeparator=paddingSeparator, setToMidpoint=True)
-
-                # Cells | Convert boundaries to cells
-                cells = [dict(x0=separators_col[c][1]+1, y0=separators_row[r][1]+1, x1=separators_col[c+1][1], y1=separators_row[r+1][1], row=r, col=c)
-                            for r in range(len(separators_row)-1) for c in range(len(separators_col)-1)]
-                cells = [scale_cell_to_dpi(cell, dpi_start=dpi_model, dpi_target=dpi_words) for cell in cells]
-
                 # Extract image from pdf
                 pdf = fitz.open(path_pdfs / name_pdf)
                 page = pdf.load_page(pageNumber-1)
@@ -349,6 +367,18 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                 img = Image.new(img_tight.mode, (int(img_tight.width+padding*2*scale_factor), int(img_tight.height+padding*2*scale_factor)), 255)
                 img.paste(img_tight, (int(padding*scale_factor), int(padding*scale_factor)))
                 img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)     
+
+                # Cells
+                # Cells | Convert predictions to boundaries
+                separators_row = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_row[sampleNumber]) if preds.row[sampleNumber][idx] >= truth_threshold])
+                separators_col = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_col[sampleNumber]) if preds.col[sampleNumber][idx] >= truth_threshold])
+                separators_row = parse_separators(separatorArray=separators_row, padding=padding, size=int(img.height//scale_factor), setToMidpoint=True)
+                separators_col = parse_separators(separatorArray=separators_col, padding=padding, size=int(img.width//scale_factor), setToMidpoint=True)
+
+                # Cells | Convert boundaries to cells
+                cells = [dict(x0=separators_col[c][1]+1, y0=separators_row[r][1]+1, x1=separators_col[c+1][0], y1=separators_row[r+1][0], row=r, col=c)
+                            for r in range(len(separators_row)-1) for c in range(len(separators_col)-1)]
+                cells = [scale_cell_to_dpi(cell, dpi_start=dpi_model, dpi_target=dpi_words) for cell in cells]
 
                 # Data 
                 # Data | OCR by initial cell
@@ -435,18 +465,21 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                 # Visualise
                 # Visualise | Cell annotations
                 if draw_images:
-                    overlay = Image.new('RGBA', img.size, (0,0,0,0))
-                    img_annot = ImageDraw.Draw(overlay)
+                    table = Image.new('RGBA', img.size, (255,255,255,255))
+                    img_annot = ImageDraw.Draw(table)
                     for cell in cells:
-                        img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill=COLOR_CELL, outline=COLOR_OUTLINE, width=2)
+                        # img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill='COLOR_CELL', outline=COLOR_OUTLINE, width=2)
+                        img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill='white', outline='black', width=2)
                         if cell['text']:
-                            img_annot.rectangle(xy=img_annot.textbbox((cell['x0'], cell['y0']), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240), width=2)
-                            img_annot.text(xy=(cell['x0'], cell['y0']), text=cell['text'], fill=(0, 0, 0, 180), anchor='la', font=FONT_TEXT,)
-                    img_annot.text(xy=(img.width // 2, img.height // 40 * 39), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 230), anchor='md')
+                            img_annot.rectangle(xy=img_annot.textbbox((cell['x0']+1, cell['y0']+1), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240), width=2)
+                            img_annot.text(xy=(cell['x0']+1, cell['y0']+1), text=cell['text'], fill=(0, 0, 0, 255), anchor='la', font=FONT_TEXT,)
+                    img_annot.text(xy=(img.width // 2, img.height - 4), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 230), anchor='md')
                     
                     # Visualise | Save image
-                    img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
-                    img.save(path_processed_images / f'{name_full}.png')
+                    bg = img.convert('RGBA')
+                    bg.putalpha(OPACITY_ORIGINAL)
+                    tableImage = Image.alpha_composite(table, bg).convert('RGB')
+                    tableImage.save(path_processed_images / f'{name_full}.png')
 
 
 # Individual file run for testing

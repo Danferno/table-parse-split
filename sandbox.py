@@ -15,9 +15,9 @@ def run():
     PADDING = 40
 
     PATH_ROOT = Path(r"F:\ml-parsing-project\table-parse-split")
-    TASKS = {'train_linemodel': False, 'eval_linemodel': False, 'train_separatormodel': True, 'eval_separatormodel':True, 'postprocess': False}
+    TASKS = {'train_linemodel': False, 'eval_linemodel': False, 'train_separatormodel':False, 'eval_separatormodel': False, 'postprocess': True}
     BEST_RUN_LINE = Path(r"F:\ml-parsing-project\table-parse-split\models\7_separatorModelAdded_lineLevel\model_best.pt")
-    BEST_RUN_SEPARATOR = Path(r"F:\ml-parsing-project\table-parse-split\models\7_separatorModelAdded_separatorLevel\model_best.pt")
+    BEST_RUN_SEPARATOR = Path(r"F:\ml-parsing-project\table-parse-split\models\8_lineScannerAdapted_separatorLevel\model_best.pt")
 
     # Model parameters
     EPOCHS_LINELEVEL = 50
@@ -64,12 +64,10 @@ def run():
         print(path_best_model_separator)
         evaluate.evaluate_separatorLevel(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True)
 
-
-
     if TASKS['postprocess']:
-        path_best_model_line = BEST_RUN_LINE if not TASKS['train'] else path_model_lineLevel / 'model_best.pt'
-        predict_and_process(path_model_file=path_best_model_line, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
-                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING)
+        path_best_model_separator = BEST_RUN_SEPARATOR if not TASKS['train_separatormodel'] else path_model_separatorLevel / 'model_best.pt'
+        predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
+                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, draw_images=True)
 
 if __name__ == '__main__':
     run()
