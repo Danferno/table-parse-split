@@ -5,6 +5,7 @@ import torch    # type : ignore
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from glob import glob
 import easyocr
 import fitz     # type : ignore
 import cv2 as cv
@@ -12,6 +13,7 @@ from tqdm import tqdm
 import json
 import os
 from lxml import etree
+import logging
 
 from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
@@ -48,7 +50,6 @@ def preds_to_separators(predArray, threshold=0.8, setToMidpoint=False, addPaddin
         separators = np.stack([separator_means, separator_means+1], axis=1)
 
     return separators
-
 def parse_separators(separatorArray:list, padding, size, setToMidpoint=True):
     try:   
         # Set to midpoint
@@ -63,7 +64,6 @@ def parse_separators(separatorArray:list, padding, size, setToMidpoint=True):
         separatorArray = np.concatenate((np.array([[padding-1, padding]]), np.array([[size-padding, size-padding+1]])), axis=0)
 
     return separatorArray
-
 def get_first_non_null_values(df):
     # Get first value
     header_candidates = df.iloc[:5].fillna(method='bfill', axis=0).iloc[:1].copy()
@@ -98,7 +98,6 @@ def scale_cell_to_dpi(cell, dpi_start, dpi_target):
     for key in ['x0', 'x1', 'y0', 'y1']:
         cell[key] = int((cell[key]*dpi_target/dpi_start).round(0))
     return cell
-
 def arrayToXml(array:list, xmlRoot:etree.Element, label:str, orientation:str, tableBbox:np.array):
     for start, end in array:
         xml_obj = etree.SubElement(xmlRoot, 'object')
@@ -115,6 +114,33 @@ def arrayToXml(array:list, xmlRoot:etree.Element, label:str, orientation:str, ta
 def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cuda', replace_dirs='warn', draw_images=False, padding=40):
     ''' Detect tables'''
     ...
+
+def generate_features_lineLevel(path_images, path_pdfs, path_out, path_data_skew=None, 
+                                dpi_ocr=300,
+                                replace_dirs='warn', verbosity=logging.INFO, languages_easyocr=['nl', 'fr', 'de', 'en'], languages_tesseract='nld+fra+deu+eng', gpu=True, split_stub_page='-p', split_stub_table='_t',
+                                config_pytesseract_fast = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_fast" --oem 3 --psm 11',
+                                config_pytesseract_legacy = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'):
+    # Parameters
+    path_out_words = path_out / 'words'
+    reader = easyocr.Reader(lang_list=languages_easyocr, gpu=gpu, quantize=True)
+
+    # Make folders
+    utils.makeDirs(path_out_words, replaceDirs=replace_dirs)
+
+    # Assemble list of pages within pdfs that contain tables
+    pdfNames = set([entry.name.split(split_stub_page)[0] for entry in os.scandir(path_images)])
+    pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_images, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
+
+    # Generate words files
+    for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), 'Generating words files'):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
+        utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
+                        dpi_ocr=dpi_ocr, reader=reader, split_stub_page=split_stub_page,
+                        languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
+                        draw_images=True)
+    
+    # Generate features
+    ...
+
 
 def predict_lineLevel(path_model_file, path_data, path_predictions_line=None, device='cuda', replace_dirs='warn'):
     # Parse parameters
@@ -153,7 +179,6 @@ def predict_lineLevel(path_model_file, path_data, path_predictions_line=None, de
                     json.dump(pred_dict, f)
     with open(path_predictions_line.parent / 'path_model_predictions_lineLevel.txt', 'w') as f:
         f.write(f'Model path: {path_model_file}')
-
 def generate_featuresAndTargets_separatorLevel(path_best_model_line, path_data, path_words, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
     # Parse parameters
     path_data = Path(path_data)
@@ -307,8 +332,6 @@ def generate_featuresAndTargets_separatorLevel(path_best_model_line, path_data, 
             img = Image.alpha_composite(img, overlay_row)
             img = Image.alpha_composite(img, overlay_col).convert('RGB')
             img.save(path_annotated_images / f'{tableName}.png')
-
-
 def predict_and_process(path_model_file, path_data, path_words, path_pdfs, device='cuda', replace_dirs='warn', path_processed=None, padding=40, draw_text_scale=1, truth_threshold=0.5,
                         out_data=True, out_images=False, out_labels_separators=False, out_labels_rows=True):
     # Parse parameters

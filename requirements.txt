@@ -7,3 +7,5 @@ prettytable
 torchviz
 
 image_similarity_measures[speedups]
+
+tabledetect

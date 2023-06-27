@@ -1,6 +1,30 @@
 import os, shutil
 import click
 import pandas as pd
+import json
+import pickle
+from collections import namedtuple
+
+import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
+
+import cv2 as cv
+from PIL import Image,  ImageDraw, ImageFont
+from deskew import determine_skew
+import tabledetect
+
+from pathlib import Path
+import logging
+import random
+import fitz # type : ignore
+
+import pytesseract
+
+import time
+from tqdm import tqdm
+from joblib import Parallel, delayed
+
+import process
 
 # Constants
 COLOR_CORRECT = (0, 255, 0, int(0.25*255))
@@ -27,6 +51,333 @@ def makeDirs(path, replaceDirs='warn'):
             replaceDir(path)
         else:
             raise FileExistsError
+
+# Pdf to words
+# Pdf to words | Helpers
+BoxIntersect = namedtuple('BoxIntersect', field_names=['left', 'right', 'top', 'bottom', 'intersect', 'Index'])
+def boxes_intersect(box, box_target):
+    overlap_x = ((box.left >= box_target.left) & (box.left < box_target.right)) | ((box.right >= box_target.left) & (box.left < box_target.left))
+    overlap_y = ((box.top >= box_target.top) & (box.top < box_target.bottom)) | ((box.bottom >= box_target.top) & (box.top < box_target.top))
+
+    return all([overlap_x, overlap_y])
+def box_intersects_boxList(box, box_targets):
+    overlap = any([boxes_intersect(box, box_target=box_target) for box_target in box_targets])
+    return overlap
+def tighten_word_bbox(img_blackIs1, bboxRow, window_emptyrow_relative_factor=5, window_emptyrow_window_size=5):
+    # Get bbox pixels
+    pixelsInBbox = img_blackIs1[bboxRow['top']:bboxRow['bottom']+1, bboxRow['left']:bboxRow['right']+1]
+
+    # Exclude horizontal lines
+    wide_left = max(0, bboxRow['left']-20)
+    wide_right = min(img_blackIs1.shape[1], bboxRow['right']+20)
+    widerPixels = img_blackIs1[bboxRow['top']:bboxRow['bottom']+1, wide_left:wide_right]
+    containsLine = (widerPixels.mean(axis=1) >= 0.85)
+
+    try:
+        firstLine = np.where(containsLine)[0][0]
+        shave_line_top = np.where(containsLine[firstLine:] == False)[0][0] + firstLine + 1 if firstLine < pixelsInBbox.shape[0] // 4 else 0
+    except IndexError:
+        shave_line_top = 0
+
+    try:
+        lastLine = np.where(containsLine)[0][-1]
+        shave_line_bot = np.where(containsLine[:lastLine] == False)[0][-1] + 1 if lastLine > pixelsInBbox.shape[0] // 4 * 3 else 0
+    except IndexError:
+        shave_line_bot = 0
+
+    # Exclude vertical lines
+    tall_top = max(0, bboxRow['top']-20)
+    tall_bottom = min(img_blackIs1.shape[0], bboxRow['bottom']+20+1)
+    tallPixels = img_blackIs1[tall_top:tall_bottom, bboxRow['left']:bboxRow['right']+1]
+    containsLine = (tallPixels.mean(axis=0) >= 0.9)
+
+    try:
+        firstLine = np.where(containsLine)[0][0]
+        shave_line_left = np.where(containsLine[firstLine:] == False)[0][0] + firstLine + 1 if firstLine < pixelsInBbox.shape[1] // 4 else 0
+    except IndexError:
+        shave_line_left = 0
+
+    try:
+        lastLine = np.where(containsLine)[0][-1]
+        shave_line_right = np.where(containsLine[:lastLine] == False)[0][-1] + 1 if lastLine > pixelsInBbox.shape[1] // 4 * 3 else 0
+    except IndexError:
+        shave_line_right = 0
+
+    pixelsInBbox = pixelsInBbox[shave_line_top:(pixelsInBbox.shape[0]-shave_line_bot), shave_line_left:(pixelsInBbox.shape[1]-shave_line_right)]
+
+    rowBlacks = pixelsInBbox.sum(axis=1)
+    rowBlackCount = len(rowBlacks[rowBlacks!=0])
+    colBlacks = pixelsInBbox.sum(axis=0)
+
+    if rowBlackCount:
+        row_fewBlacks_absolute = (rowBlacks <= 2)
+        row_fewBlacks_relative = (rowBlacks <= np.mean(rowBlacks[rowBlacks!=0])/window_emptyrow_relative_factor)
+        # Rolling window approach to control for text blocks that overlap previous line text
+        try:      
+            row_fewBlacks_window = np.median(sliding_window_view(rowBlacks, window_emptyrow_window_size+1), axis=1)
+            if row_fewBlacks_window.max() < 0.01:       # For single rows (e.g. all dots) it sometimes returns all empty
+                row_fewBlacks_window = np.full_like(row_fewBlacks_window, fill_value=False, dtype=bool)
+            else:
+                row_fewBlacks_window = (row_fewBlacks_window < 0.01)
+            row_fewBlacks_window = np.insert(row_fewBlacks_window, obj=row_fewBlacks_window.size//2, values=np.full(shape=window_emptyrow_window_size, fill_value=False))     # Insert 999 in middle to recover obs lost due to window
+            
+        except ValueError:
+            row_fewBlacks_window = np.full_like(a=row_fewBlacks_absolute, fill_value=False)
+    else:
+        row_fewBlacks_absolute = np.full(shape=rowBlacks.shape, fill_value=True)
+        row_fewBlacks_relative = np.ndarray.view(row_fewBlacks_absolute)
+        row_fewBlacks_window = np.ndarray.view(row_fewBlacks_absolute)
+    
+    rowLikelyEmpty = row_fewBlacks_absolute | row_fewBlacks_relative | row_fewBlacks_window      
+    colLikelyEmpty = (colBlacks == 0)
+
+    shave = {}
+    try:
+        shave['top'] = np.where(rowLikelyEmpty == False)[0][0]
+        shave['bottom'] = np.where(np.flip(rowLikelyEmpty) == False)[0][0]
+    # All empty based on abs+rel+wind
+    except IndexError:
+        try:
+            shave['top'] = np.where(row_fewBlacks_absolute == False)[0][0]  + shave_line_top
+            shave['bottom'] = np.where(row_fewBlacks_absolute == False)[0][-1]  + shave_line_top
+        # All empty based on abs too
+        except IndexError:
+            bboxRow['toKeep'] = False
+            return bboxRow
+    
+    shave['left'] = np.where(colLikelyEmpty == False)[0][0]
+    shave['right'] = np.where(np.flip(colLikelyEmpty) == False)[0][0]
+
+    bboxRow['left'] = bboxRow['left'] + shave['left'] + shave_line_left
+    bboxRow['right'] = bboxRow['right'] - shave['right'] + shave_line_left
+    bboxRow['top'] = bboxRow['top'] + shave['top'] + shave_line_top
+    bboxRow['bottom'] = bboxRow['bottom'] - shave['bottom'] + shave_line_top
+
+    return bboxRow
+def harmonise_bbox_height(textDf):
+    textDf['top_uniform'] = textDf.groupby(by=['blockno', 'lineno'])['top'].transform(min)
+    textDf['bottom_uniform'] = textDf.groupby(by=['blockno', 'lineno'])['bottom'].transform(max)
+
+    # Harmonise top/bottom by line | Check if always gap between lines in uniform setting
+    checkGapDf = textDf.loc[:, ['lineno', 'top_uniform', 'bottom_uniform']].drop_duplicates()
+    checkGapDf['next_top'] = checkGapDf['top_uniform'].shift(-1).fillna(9999999)
+    checkGapDf['previous_bottom'] = checkGapDf['bottom_uniform'].shift(1).fillna(0)
+    checkGapDf['uniform_OK'] = (checkGapDf['bottom_uniform'] < checkGapDf['next_top']) & (checkGapDf['top_uniform'] > checkGapDf['previous_bottom'])
+
+    # Harmonise top/bottom by line | Only make uniform if gap always remains
+    textDf = textDf.merge(right=checkGapDf[['lineno', 'uniform_OK']], on='lineno', how='left')
+    textDf.loc[textDf['uniform_OK'], 'top'] = textDf.loc[textDf['uniform_OK'], 'top_uniform']
+    textDf.loc[textDf['uniform_OK'], 'bottom'] = textDf.loc[textDf['uniform_OK'], 'bottom_uniform']
+    textDf = textDf.drop(columns=['top_uniform', 'bottom_uniform', 'uniform_OK'])
+
+    return textDf
+
+# Pdf to words | Main Function
+def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None, languages_tesseract='nld+fra+deu+eng', dpi_ocr=300, dpi_pymupdf=72, reader=None, split_stub_page='-p', force_new_ocr=False,
+                 config_pytesseract_fast='--oem 3 --psm 11', config_pytesseract_legacy='--oem 0 --psm 11', lineno_gap=5, draw_images=False):
+    # Parameters
+    path_out_ocr = path_out_words / 'ocr'
+    path_out_annotated = path_out_words / 'annotated_words'
+    if force_new_ocr:
+        makeDirs(path_out_ocr, replaceDirs=True)
+        makeDirs(path_out_annotated, replaceDirs=True)
+    else:
+        makeDirs(path_out_ocr, replaceDirs='overwrite')
+        makeDirs(path_out_annotated, replaceDirs='overwrite')
+
+    # Parse dict
+    pdfName, pageNumbers = pdfNameAndPage
+
+    # Open pdf
+    pdfPath = path_pdfs / f'{pdfName}.pdf'
+    doc:fitz.Document = fitz.open(pdfPath)
+
+    # Get words from appropriate pages
+    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers)):        # pageNumber = pageNumbers[0]
+        # Words | Page | Load page
+        page:fitz.Page = doc.load_page(page_id=pageNumber)
+        pageName = f'{pdfName}{split_stub_page}{pageNumber}'
+        path_out = path_out_words / f'{pageName}.pq'
+        
+        # Words | Page | Skip if already parsed
+        if os.path.exists(path_out):
+            continue
+
+        # Words | Page | Get words from pdf directly
+        textPage = page.get_textpage(flags=fitz.TEXTFLAGS_WORDS)
+        words = textPage.extractWORDS()
+
+        # Words | Page | Generate images for OCR
+        page_image = page.get_pixmap(dpi=dpi_ocr, alpha=False, colorspace=fitz.csGRAY)
+        img = np.frombuffer(page_image.samples, dtype=np.uint8).reshape(page_image.height, page_image.width, page_image.n)
+        _, img_array = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+        img = Image.fromarray(img_array)
+
+        # Words | Page | OCR if necessary
+        if len(words) == 0:
+            textDfs = []
+
+            # Words | Page | OCR | Deskew if required
+            if path_data_skew:
+                path_skew_file = path_data_skew / f'{pageName}.txt'
+                if os.path.exists(path_skew_file):
+                    with open(path_skew_file, 'r') as f:
+                        skewAngle = float(f.readline().strip('\n'))
+                        img = img.rotate(skewAngle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
+                        img_array = np.array(img)
+
+            # Words | Page | OCR | PyTesseract Fast
+            pathSaved = path_out_ocr / f'{pageName}_tesseractFast.pq'
+            if not os.path.exists(pathSaved):
+                text:pd.DataFrame = pytesseract.image_to_data(img, lang=languages_tesseract, config=config_pytesseract_fast, output_type=pytesseract.Output.DATAFRAME)
+                text.to_parquet(path=pathSaved)
+            else:
+                text = pd.read_parquet(pathSaved)
+            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'conf']].assign(ocrLabel='tesseract-fast')
+            wordsDf['right'] = wordsDf['left'] + wordsDf['width']
+            wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
+            wordsDf = wordsDf.drop(columns=['width', 'height'])
+            textDfs.append(wordsDf)
+            
+            # Get words from page | OCR | From Image | PyTesseract Legacy
+            pathSaved = path_out_ocr / f'{pageName}_tesseractLegacy.pq'
+            if not os.path.exists(pathSaved):
+                text:pd.DataFrame = pytesseract.image_to_data(img, lang=languages_tesseract, config=config_pytesseract_legacy, output_type=pytesseract.Output.DATAFRAME)
+                text.to_parquet(path=pathSaved)
+            else:
+                text = pd.read_parquet(pathSaved)
+            wordsDf = text.loc[text['conf'] > 30, ['left', 'top', 'width', 'height', 'text', 'conf']].assign(ocrLabel='tesseract-legacy')
+            wordsDf['right'] = wordsDf['left'] + wordsDf['width']
+            wordsDf['bottom'] = wordsDf['top'] + wordsDf['height']
+            wordsDf = wordsDf.drop(columns=['width', 'height'])
+            textDfs.append(wordsDf)
+
+            # Get words from page | OCR | From Image | EasyOCR
+            pathSaved = path_out_ocr / f'{pageName}_easyocr.pkl'
+            if not os.path.exists(pathSaved):
+                try:
+                    text = reader.readtext(image=img_array, batch_size=60, detail=1)
+                except OutOfMemoryError:        # type: ignore
+                    page_image_d4 = page.get_pixmap(dpi=int(dpi_ocr/4), alpha=False, colorspace=fitz.csGRAY)
+                    img_d4 = np.frombuffer(page_image_d4.samples, dtype=np.uint8).reshape(page_image_d4.height, page_image_d4.width, page_image_d4.n)
+                    _, img_array_d4 = cv.threshold(np.array(img_d4), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+                    text_d4 = reader.readtext(image=img_array_d4, batch_size=60, detail=1)
+                    
+                    text = []
+                    for d4 in text_d4:      # d4 = text_d4[0]
+                        bbox = d4[0]
+                        bbox = [[x*4 for x in L] for L in bbox]
+                        d1 = (bbox, *d4[1:])
+                        text.append(d1)
+
+
+                with open(pathSaved, 'wb') as file:
+                    pickle.dump(text, file)
+            else:
+                with open(pathSaved, 'rb') as file:
+                    text = pickle.load(file)
+            text = [{'left': el[0][0][0], 'right': el[0][1][0], 'top': el[0][0][1], 'bottom': el[0][2][1], 'text': el[1], 'conf': el[2]*100} for el in text]
+            text:pd.DataFrame = pd.DataFrame.from_records(text).assign(ocrLabel="easyocr")
+            wordsDf = text.loc[text['conf'] > 30]
+            textDfs.append(wordsDf)
+
+            # Combine
+            df = pd.concat(textDfs)
+            df[['left', 'right', 'top', 'bottom']] = df[['left', 'right', 'top', 'bottom']].round(0).astype(int)
+            df['text_sparse_len'] = df['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\) ]', '', regex=True).str.len()
+            df = df.loc[df['text_sparse_len'] >= 1].drop(columns='text_sparse_len').reset_index(drop=True)
+
+            # Detect intersection
+            easyocr_boxes = set(df.loc[df['ocrLabel'] == 'easyocr', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+            tessfast_boxes = set(df.loc[df['ocrLabel'] == 'tesseract-fast', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+            tesslegacy_boxes   = set(df.loc[df['ocrLabel'] == 'tesseract-legacy', ['left', 'top', 'right', 'bottom']].itertuples(name='Box'))
+
+            boxes_fastLegacy_intersect = [BoxIntersect(left=legacyBox.left, right=legacyBox.right, top=legacyBox.top, bottom=legacyBox.bottom, intersect=box_intersects_boxList(box=legacyBox, box_targets=tessfast_boxes), Index=legacyBox.Index) for legacyBox in tesslegacy_boxes]
+            tesslegacy_extraboxes = [box for box in boxes_fastLegacy_intersect if not box.intersect]
+            tess_boxes = tessfast_boxes.union(set(tesslegacy_extraboxes))
+            
+            boxes_tess_intersect = [BoxIntersect(left=tessBox.left, right=tessBox.right, top=tessBox.top, bottom=tessBox.bottom, intersect=box_intersects_boxList(box=tessBox, box_targets=easyocr_boxes), Index=tessBox.Index) for tessBox in tess_boxes]
+            tess_extraboxes = [box for box in boxes_tess_intersect if not box.intersect]
+
+            # Combine words
+            indexesToKeep = [box.Index for box in easyocr_boxes.union(set(tess_extraboxes))]
+            textDf = df.iloc[indexesToKeep]
+            textDf = textDf.reindex(columns=['top', 'left', 'bottom', 'right', 'text', 'conf', 'ocrLabel'])
+
+            # Crop bboxes
+            img_blackIs1 = np.where(np.array(img) == 0, 1, 0)
+            textDf['toKeep'] = True
+            textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
+            textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
+
+            # Define block, line and word numbers
+            textDf = textDf.sort_values(by=['top', 'left']).reset_index(drop=True)
+            textDf['wordno'], textDf['lineno'], previous_bottom, line_counter, word_counter = 0, 0, 0, 0, 0
+            textDf['blockno'] = 0
+            
+            heightCol = textDf['bottom'] - textDf['top']
+            maxHeight = heightCol.mean() + 2 * heightCol.std()
+            textDf = textDf.loc[heightCol <= maxHeight]
+
+            for idx, row in textDf.iterrows():
+                if ((row['bottom'] - previous_bottom) > lineno_gap) and (row['top'] > previous_bottom):
+                     word_counter = 0
+                     line_counter += 1
+                     previous_bottom = row['bottom']
+                else:
+                    word_counter += 1
+                textDf.loc[idx, ['lineno', 'wordno']] = line_counter, word_counter
+
+            # Harmonise top/bottom by line (bit wonky after crop/source combination otherwise)
+            textDf = harmonise_bbox_height(textDf)
+            
+        else:
+            textDf = pd.DataFrame.from_records(words, columns=['left', 'top', 'right', 'bottom', 'text', 'blockno', 'lineno', 'wordno']).assign(**{'ocrLabel': 'pdf', 'conf':100})
+            textDf['text_sparse_len'] = textDf['text'].str.replace(r'[^a-zA-Z0-9À-ÿ\.\(\) ]', '', regex=True).str.len()
+            textDf = textDf.loc[(textDf['text_sparse_len'] >= 2) | (textDf['text'] == '.') | (textDf['text'].str.isalnum())].drop(columns='text_sparse_len').reset_index(drop=True)
+            textDf[['left', 'right', 'top', 'bottom']] = (textDf[['left', 'right', 'top', 'bottom']] * (dpi_ocr / dpi_pymupdf)).round(0).astype(int)
+
+            # Crop bboxes
+            img_blackIs1 = np.where(np.array(img) == 0, 1, 0)
+            textDf['toKeep'] = True
+            textDf = textDf.apply(lambda row: tighten_word_bbox(img_blackIs1=img_blackIs1, bboxRow=row), axis=1)
+            textDf = textDf[textDf['toKeep']].drop(columns='toKeep')
+            
+            # Harmonise top/bottom by line (bit wonky after crop/source combination otherwise)
+            textDf = harmonise_bbox_height(textDf)
+        
+        # Get words from page | Save
+        textDf.to_parquet(path_out)
+
+        # Visualise words
+        if draw_images:
+            img_overlay = Image.new('RGBA', img.size, (0,0,0,0))
+            img_annot = ImageDraw.Draw(img_overlay, mode='RGBA')
+            colors = {
+                'easyocr': (255,228,181, int(0.6*255)),
+                'pdf': (255, 162, 0, int(0.5*255)),
+                'other': (0, 128, 0, int(0.5*255))
+            }
+            font_label = ImageFont.truetype('arial.ttf', size=40)
+            font_line = ImageFont.truetype('arial.ttf', size=20)
+        
+            for box in textDf.itertuples('box'):      
+                color = colors[box.ocrLabel] if box.ocrLabel in ['easyocr', 'pdf'] else colors['other']
+                img_annot.rectangle(xy=(box.left, box.top, box.right, box.bottom), fill=color)
+
+            lineDf = textDf.sort_values(by=['lineno', 'wordno']).drop_duplicates('lineno', keep='first')
+            lineLeft = max(lineDf['left'].min() - 50, 20)
+
+            for line in lineDf.itertuples('line'):      # line = next(lineDf.itertuples('line'))
+                img_annot.text(xy=(lineLeft, line.top), text=str(line.lineno), anchor='la', fill='black', font=font_line)
+
+
+            img_annot.text(xy=(img.size[0] // 4 * 1, img.size[1] // 15 * 14), text='easyocr', anchor='ld', fill=colors['easyocr'], font=font_label)
+            img_annot.text(xy=(img.size[0] // 4 * 2, img.size[1] // 15 * 14), text='pdf', anchor='ld', fill=colors['pdf'], font=font_label)
+            img_annot.text(xy=(img.size[0] // 4 * 3, img.size[1] // 15 * 14), text='tesseract', anchor='ld', fill=colors['other'], font=font_label)
+
+            img = Image.alpha_composite(img.convert('RGBA'), img_overlay)
+            img.convert('RGB').save(path_out_annotated / f'{pageName}.png')
         
 def pageWords_to_tableWords(path_words, tableName, metaInfo, tableSplitString='_t'):
     # Technicalities
@@ -52,3 +403,197 @@ def pageWords_to_tableWords(path_words, tableName, metaInfo, tableSplitString='_
 
     # Return df
     return wordsDf_table
+
+def pdfToImages(path_input, path_out, image_format='.jpg', sample_size_pdfs=100, dpi=150, keep_transparency=False, n_workers=-1,
+                deskew=True, verbosity=logging.INFO, replace_dirs='warn', exclude_list=[]):
+    ''' Updated version of tabledetect one, allows for exclusion list'''
+    # Parse parameters
+    if not image_format.startswith('.'): image_format = f'.{image_format}'
+    path_out = Path(path_out)
+    path_out_pages = path_out / 'pages_images'
+    path_out_pdfs  = path_out / 'pdfs'
+    path_meta      = path_out / 'meta'
+
+    exclude_list = set(exclude_list)
+
+    # Create folders
+    makeDirs(path_out_pages, replaceDirs=replace_dirs)
+    makeDirs(path_out_pdfs, replaceDirs=replace_dirs)
+    makeDirs(path_meta, replaceDirs='overwrite')
+    makeDirs(path_meta / 'skewAngles', replaceDirs=replace_dirs)
+
+    # Logging
+    logger = logging.getLogger(__name__); logger.setLevel(verbosity)
+
+    # Draw sample
+    pdf_donorPool = [pdfEntry.path for pdfEntry in os.scandir(path_input) if pdfEntry.name not in exclude_list]
+    pdf_sample = random.sample(pdf_donorPool, k=sample_size_pdfs)
+
+    # Split
+    def splitPdf(pdfPath, path_output):
+        try:
+            # Load pdf
+            with open(pdfPath) as pdfFile:
+                doc = fitz.open(pdfFile)
+            filename = os.path.basename(pdfPath).replace('.pdf', '')
+
+            # Convert pages to images
+            for page in doc:
+                # Get pixmap
+                pixmap = page.get_pixmap(alpha=keep_transparency, dpi=dpi, colorspace=fitz.csGRAY)
+                pageName = f"{filename}-p{page.number}"
+
+                # Threshold to binary
+                img = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)
+                _, img = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+
+                if deskew:
+                    # Deskew
+                    skewAngle = determine_skew(img, min_angle=0.25, max_angle=5, min_deviation=0.25, num_peaks=20, sigma=10)
+                    img = Image.fromarray(img)
+                    if skewAngle:
+                        img = img.rotate(skewAngle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
+                        with open(path_meta / 'skewAngles' / f'{pageName}.txt', 'w') as f:
+                            f.write(f'{skewAngle:.2f}')
+               
+                # Save
+                img.save(path_output / f'{pageName}{image_format}')
+
+            # Copy pdf to destination
+            shutil.copyfile(src=pdfPath, dst=path_out_pdfs / f'{filename}.pdf')
+            return True
+        
+        except fitz.fitz.FileDataError:
+            return False
+        
+    if n_workers == 1:
+        start = time.time()
+        results = [splitPdf(pdfPath=pdfPath, path_output=path_out_pages) for pdfPath in tqdm(pdf_sample, desc='Splitting PDF files')]
+        logger.info(f'Splitting {len(results)} PDFs took {time.time()-start:.0f} seconds. {results.count(False)} PDFs raised an error.')
+
+    else:
+        from joblib import Parallel, delayed
+        start = time.time()
+        results = Parallel(n_jobs=n_workers, backend="loky", verbose=verbosity//2)(delayed(splitPdf)(pdfPath, path_out_pages) for pdfPath in pdf_sample)
+        logger.info(f'Splitting {len(results)} PDFs took {time.time()-start:.0f} seconds. {results.count(False)} PDFs raised an error.')
+
+    # Report meta
+    with open(path_meta / 'pdfToImages.json', 'w') as f:
+        json.dump(dict(dpi=dpi, image_format=image_format, sample_size_pdfs=sample_size_pdfs, pdfs_parsed=len(results), pdfs_failed=results.count(False)), fp=f)
+def yolo_to_pilbox(yoloPath, targetImage):
+        targetWidth, targetHeight = targetImage.size
+        pilBoxes = []
+
+        with open(yoloPath, 'r') as yoloFile:
+            for annotationLine in yoloFile:         # annotationLine = yoloFile.readline()
+                cat, xc, yc, w, h, conf = [float(string.strip('\n')) for string in annotationLine.split(' ')]
+                
+                x0 = round((xc - w/2) * targetWidth)
+                x1 = round((xc + w/2) * targetWidth)
+                y0 = round((yc - h/2) * targetHeight)
+                y1 = round((yc + h/2) * targetHeight)
+
+                pilBoxes.append([x0, y0, x1, y1])
+        return pilBoxes
+def detect_to_croppedTable(path_labels, path_images, path_out, padding, image_format, max_samples=None, n_workers=1, replace_dirs='warn', verbosity=logging.INFO):
+    # Parameters
+    path_out_tables_images = path_out / 'tables_images'
+    path_meta = path_out / 'meta'
+    makeDirs(path_meta, replaceDirs='overwrite')
+    makeDirs(path_out_tables_images, replaceDirs=replace_dirs)
+
+    def __label_to_crop(pageName):
+        img = Image.open(path_images / f'{pageName}{image_format}')
+        table_bboxes = yolo_to_pilbox(yoloPath=path_labels / f'{pageName}.txt', targetImage=img)        # x0 y0 x1 y1
+        
+        for idx, bbox in enumerate(table_bboxes):
+            img_cropped = img.crop(bbox)
+            img_padded = Image.new(img_cropped.mode, (img_cropped.width+padding*2, img_cropped.height+padding*2), 255)
+            img_padded.paste(img_cropped, (padding, padding))
+            img_padded.save(path_out_tables_images / f'{pageName}_t{idx}{image_format}')
+
+    # Determine approximate number of pages to parse
+    pageNames_all = [os.path.splitext(entry.name)[0] for entry in os.scandir(path_labels)]
+    pageNames = []
+    if max_samples:
+        counter = 0
+        for pageName in pageNames_all:
+            pageNames.append(pageName)
+            with open(path_labels / f'{pageName}.txt', 'r') as f:
+                counter += len(f.readlines())
+            if counter >= max_samples:
+                break
+    else:
+        pageNames = pageNames_all
+
+    # Crop tables
+    if n_workers == 1:
+        for pageName in tqdm(pageNames, desc='Cropping detected tables'):
+            __label_to_crop(pageName)
+    else:
+        results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(__label_to_crop)(pageName) for pageName in pageNames)
+
+    # Report meta
+    with open(path_meta / 'detectToCroppedTables.json', 'w') as f:
+        json.dump(dict(padding=padding, image_format=image_format), fp=f)
+
+
+def generate_training_sample(path_pdfs, path_out, sample_size_pdfs, 
+                             path_model_detect, path_model_parse_line, path_model_parse_separator, 
+                             sample_size_tables=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
+                             threshold_detect=0.7, padding_tables=40, 
+                             split_stub='-p', active_learning=True, deskew=True, image_format='.png',
+                             n_workers=-1, verbosity=logging.INFO):
+    '''
+        sample_size_pdfs: number of pdfs to parse for tables
+        sample_size_tables: maximum amount of tables in final sample'''
+    
+    # Parse paths
+    path_pdfs = Path(path_pdfs); path_out = Path(path_out)
+    exclude_pdfs_by_image_folder_list = [Path(folder) for folder in exclude_pdfs_by_image_folder_list]
+
+    # Create folders
+    makeDirs(path_out / 'meta', replaceDirs=replace_dirs)
+    makeDirs(path_out / 'tables_bboxes', replaceDirs=replace_dirs)
+
+    # Optional: Get list of pdfs to exclude from sampling
+    pdf_exclude_list = []
+    if exclude_pdfs_by_image_folder_list:
+        for folder in exclude_pdfs_by_image_folder_list:
+            files = os.scandir(folder)
+            pdfs = set([file.name.split(split_stub)[0] for file in files])
+            pdf_exclude_list = pdf_exclude_list + list(pdfs)
+    pdf_exclude_list = set(pdf_exclude_list)
+    pdf_exclude_list = [f'{name}.pdf' for name in pdf_exclude_list]
+
+    # Sample pdfs
+    pdfToImages(path_input=path_pdfs, path_out=path_out, image_format='.png', sample_size_pdfs=sample_size_pdfs, replace_dirs=replace_dirs, n_workers=n_workers, deskew=deskew)
+
+    # Detect tables
+    tabledetect.detect_table(path_weights=path_model_detect, path_input=path_out / 'pages_images', path_output=path_out / 'temp', image_format='.png', threshold_confidence=threshold_detect, save_visual_output=False)
+    shutil.copytree(src=path_out / 'temp' / 'out' / 'table-detect' / 'labels', dst=path_out / 'tables_bboxes', dirs_exist_ok=True)
+    shutil.rmtree(path_out / 'temp')
+    
+    # Generate cropped+padded tables
+    detect_to_croppedTable(path_labels=path_out / 'tables_bboxes', path_images=path_out / 'pages_images', path_out=path_out, padding=padding_tables, image_format=image_format, n_workers=n_workers, max_samples=sample_size_tables, replace_dirs=replace_dirs, verbosity=verbosity)
+
+    # Generate line-level features
+    process.generate_features_lineLevel(path_images=path_out / 'tables_images', path_pdfs=path_out / 'pdfs', path_out=path_out, path_data_skew=path_out / 'meta' / 'skewAngles', replace_dirs=replace_dirs, verbosity=verbosity)
+    ...
+
+
+
+
+if __name__ == '__main__':
+    path_pdfs = r'F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted\2023-05-16\samples_missing_pdfFiles'
+    path_out = r'F:\ml-parsing-project\data\parse_activelearning2_png'
+    path_models = Path(r'F:\ml-parsing-project\models')
+    path_previous_samples = [r'F:\ml-parsing-project\data\parse_activelearning1_jpg\selected']
+
+    n_workers = 1
+    sample_size_pdfs = 2
+
+    generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, sample_size_pdfs=sample_size_pdfs,
+                             n_workers=n_workers,
+                             path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
+                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=True, replace_dirs=True)
