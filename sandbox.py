@@ -69,7 +69,7 @@ def run():
         # predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
         #             path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_images=True, out_labels_rows=False)
         predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
-                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_images=True, out_labels_rows=True)
+                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_data=False, out_images=False, out_labels_rows=True)
 
 if __name__ == '__main__':
     run()

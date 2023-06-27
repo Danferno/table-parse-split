@@ -402,33 +402,34 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                             for r in range(len(separators_row_mid)-1) for c in range(len(separators_col_mid)-1)]
                 cells = [scale_cell_to_dpi(cell, dpi_start=dpi_model, dpi_target=dpi_words) for cell in cells]
 
-                # Data 
-                # Data | OCR by initial cell
-                if textSource == 'ocr-based':                     
-                    img_array = np.array(img)
+                if out_data or out_images:
+                    # Data 
+                    # Data | OCR by initial cell
+                    if textSource == 'ocr-based':                     
+                        img_array = np.array(img)
 
-                    for cell in cells:
-                        textList = reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=1)
-                        if textList:
-                            textList_sorted = sorted(textList, key=lambda el: (el[0][0][1]//15, el[0][0][0]))       # round height to the lowest X to avoid height mismatch from fucking things up
-                            cell['text'] = ' '.join([el[1] for el in textList_sorted])
-                        else:
-                            cell['text'] = ''
-                else:
-                    # Reduce wordsDf to table dimensions
-                    wordsDf = wordsDf.loc[(wordsDf['top'] >= tableRect.y0) & (wordsDf['left'] >= tableRect.x0) & (wordsDf['bottom'] <= tableRect.y1) & (wordsDf['right'] <= tableRect.x1)]
+                        for cell in cells:
+                            textList = reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=1)
+                            if textList:
+                                textList_sorted = sorted(textList, key=lambda el: (el[0][0][1]//15, el[0][0][0]))       # round height to the lowest X to avoid height mismatch from fucking things up
+                                cell['text'] = ' '.join([el[1] for el in textList_sorted])
+                            else:
+                                cell['text'] = ''
+                    else:
+                        # Reduce wordsDf to table dimensions
+                        wordsDf = wordsDf.loc[(wordsDf['top'] >= tableRect.y0) & (wordsDf['left'] >= tableRect.x0) & (wordsDf['bottom'] <= tableRect.y1) & (wordsDf['right'] <= tableRect.x1)]
 
-                    # Adapt wordsDf coordinates to model table coordinates
-                    wordsDf.loc[:, ['left', 'right']] = wordsDf.loc[:, ['left', 'right']] - tableRect.x0
-                    wordsDf.loc[:, ['top', 'bottom']] = wordsDf.loc[:, ['top', 'bottom']] - tableRect.y0
-                    wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_words / dpi_pdf) + padding_model * (dpi_words/dpi_model)
-                    wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']]
-                    wordsDf = wordsDf.rename(columns={'left': 'x0', 'right': 'x1', 'top': 'y0', 'bottom': 'y1'})
+                        # Adapt wordsDf coordinates to model table coordinates
+                        wordsDf.loc[:, ['left', 'right']] = wordsDf.loc[:, ['left', 'right']] - tableRect.x0
+                        wordsDf.loc[:, ['top', 'bottom']] = wordsDf.loc[:, ['top', 'bottom']] - tableRect.y0
+                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_words / dpi_pdf) + padding_model * (dpi_words/dpi_model)
+                        wordsDf.loc[:, ['left', 'right', 'top', 'bottom']] = wordsDf.loc[:, ['left', 'right', 'top', 'bottom']]
+                        wordsDf = wordsDf.rename(columns={'left': 'x0', 'right': 'x1', 'top': 'y0', 'bottom': 'y1'})
 
-                    # Assign text to cells
-                    for cell in cells:
-                        overlap = wordsDf.apply(lambda row: boxes_intersect(box=cell, box_target=row), axis=1)
-                        cell['text'] = ' '.join(wordsDf.loc[overlap, 'text'])
+                        # Assign text to cells
+                        for cell in cells:
+                            overlap = wordsDf.apply(lambda row: boxes_intersect(box=cell, box_target=row), axis=1)
+                            cell['text'] = ' '.join(wordsDf.loc[overlap, 'text'])
 
                 # Data | Convert to dataframe
                 if out_data:
@@ -521,7 +522,12 @@ def predict_and_process(path_model_file, path_data, path_words, path_pdfs, devic
                     xml_size = etree.SubElement(xml, 'size')
                     xml_width  = etree.SubElement(xml_size, 'width');   xml_width.text = str(int( img.width // scale_factor))
                     xml_height = etree.SubElement(xml_size, 'height'); xml_height.text = str(int(img.height // scale_factor))
+
+                    # Add confidence score (0: all separators 0.5; 1: all separators 0 or 1) (we take 25th percentile of confidence for rows and cols separately)
+                    confidence = torch.mean(torch.stack([torch.quantile(torch.abs((preds.row[sampleNumber].squeeze() - 0.5)), q=0.5), torch.quantile(torch.abs((preds.col[sampleNumber].squeeze() - 0.5)), q=0.5)]))*2
+                    xml_confidence = etree.SubElement(xml, 'confidence_score'); xml_confidence.text = f'{confidence.item():0.3f}'
                     
+                    # Add table bbox
                     xml_table = etree.SubElement(xml, 'object')
                     xml_label = etree.SubElement(xml_table, 'name'); xml_label.text = 'table'
                     xml_table_bbox = etree.SubElement(xml_table, 'bndbox')
