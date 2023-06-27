@@ -31,6 +31,8 @@ COLOR_CORRECT = (0, 255, 0, int(0.25*255))
 COLOR_WRONG = (255, 0, 0, int(0.25*255))
 COLOR_MIDDLE = (128, 128, 0, int(0.25*255))
 
+random.seed(498465464)
+
 # Functions
 def replaceDir(path):
     shutil.rmtree(path)
@@ -378,7 +380,58 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
 
             img = Image.alpha_composite(img.convert('RGBA'), img_overlay)
             img.convert('RGB').save(path_out_annotated / f'{pageName}.png')
+
+# Line-level features
+# Line-level features | Helpers
+def yolo_to_fitzBox(yoloPath, targetPdfSize):
+    targetWidth, targetHeight = targetPdfSize
+    fitzBoxes = []
+    with open(yoloPath, 'r') as yoloFile:
+        for annotationLine in yoloFile:
+            cat, xc, yc, w, h, conf = [float(string.strip('\n')) for string in annotationLine.split(' ')]
+            
+            x0 = (xc - w/2) * targetWidth
+            x1 = (xc + w/2) * targetWidth
+            y0 = (yc - h/2) * targetHeight
+            y1 = (yc + h/2) * targetHeight
+
+            fitzBoxes.append([x0, y0, x1, y1])
+    return fitzBoxes
+
+# Line-level features | Main
+def generate_features_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, path_words=None, path_pdfs=None, path_images=None, path_bboxes=None, replace_dirs='warn',
+                                           split_stub_page='-p', dpi_pymupdf=72, dpi_ocr=300):
+    # Parameters
+    path_out = Path(path_out)
+    path_images = path_images or path_out / 'tables_images'
+    path_bboxes = path_bboxes or path_out / 'tables_bboxes'
+    path_pdfs = path_pdfs or path_out / 'pdfs'
+    path_words = path_words or path_out / 'words'
+
+    # Parse dict
+    pdfName, pageNumbers = pdfNameAndPage
+
+    # Open pdf
+    pdfPath = path_pdfs / f'{pdfName}.pdf'
+    doc:fitz.Document = fitz.open(pdfPath)
+
+    # Features singlepdf | Loop over pages
+    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers)):        # pageNumber = pageNumbers[0]
+        page:fitz.Page = doc.load_page(page_id=pageNumber)
+        pageName = f'{pdfName}{split_stub_page}{pageNumber}'
         
+        # Page | Table bboxes
+        fitzBoxes = yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , targetPdfSize=page.mediabox_size)
+
+        # Page | Text
+        textDf_page = pd.read_parquet(path_words / f'{pageName}.pq')
+        textDf_page.loc[:, ['left', 'right', 'top', 'bottom']] = textDf_page.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_pymupdf / dpi_ocr)
+
+        # Page | Loop over tables
+        for tableIteration, fitzBox in enumerate(fitzBoxes):      # tableIteration = 0; fitzBox = fitzBoxes[tableIteration]
+            ...
+
+
 def pageWords_to_tableWords(path_words, tableName, metaInfo, tableSplitString='_t'):
     # Technicalities
     pd.set_option('mode.copy_on_write', True)

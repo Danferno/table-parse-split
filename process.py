@@ -109,7 +109,6 @@ def arrayToXml(array:list, xmlRoot:etree.Element, label:str, orientation:str, ta
         xmin = etree.SubElement(xml_bbox, 'xmin'); xmin.text = str(start)     if orientation == 'col' else tableBbox['xmin']
         xmax = etree.SubElement(xml_bbox, 'xmax'); xmax.text = str(end)       if orientation == 'col' else tableBbox['xmax']
 
-
 # Function
 def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cuda', replace_dirs='warn', draw_images=False, padding=40):
     ''' Detect tables'''
@@ -122,24 +121,25 @@ def generate_features_lineLevel(path_images, path_pdfs, path_out, path_data_skew
                                 config_pytesseract_legacy = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'):
     # Parameters
     path_out_words = path_out / 'words'
+    path_out_features = path_out / 'features'
     reader = easyocr.Reader(lang_list=languages_easyocr, gpu=gpu, quantize=True)
 
     # Make folders
     utils.makeDirs(path_out_words, replaceDirs=replace_dirs)
+    utils.makeDirs(path_out_features, replaceDirs=replace_dirs)
 
     # Assemble list of pages within pdfs that contain tables
     pdfNames = set([entry.name.split(split_stub_page)[0] for entry in os.scandir(path_images)])
     pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_images, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
 
-    # Generate words files
+    # Generate words files and feature files
     for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), 'Generating words files'):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
         utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
                         dpi_ocr=dpi_ocr, reader=reader, split_stub_page=split_stub_page,
                         languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
                         draw_images=True)
-    
-    # Generate features
-    ...
+        utils.generate_features_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features,
+                                                     replace_dirs=replace_dirs)
 
 
 def predict_lineLevel(path_model_file, path_data, path_predictions_line=None, device='cuda', replace_dirs='warn'):
