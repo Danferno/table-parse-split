@@ -7,7 +7,7 @@ def run():
     from train import train_lineLevel, train_separatorLevel
     import evaluate
     from describe import describe_model
-    from process import predict_and_process, generate_featuresAndTargets_separatorLevel
+    from process import predict_and_process, preprocess_separatorLevel
     
     # Constants
     # RUN_NAME = datetime.now().strftime("%Y_%m_%d__%H_%M")
@@ -54,7 +54,7 @@ def run():
     if TASKS['train_separatormodel']:
         path_best_model_line = BEST_RUN_LINE if not TASKS['train_linemodel'] else path_model_lineLevel / 'model_best.pt'
         print(path_best_model_line)
-        generate_featuresAndTargets_separatorLevel(path_best_model_line=path_best_model_line, path_data=path_data / 'all', path_words=path_words, replace_dirs=True, draw_images=True)
+        preprocess_separatorLevel(path_model_line=path_best_model_line, path_data=path_data / 'all', path_words=path_words, replace_dirs=True, draw_images=True, legacy_folder_names=True)
         train_separatorLevel(profile=False, epochs=EPOCHS_SEPARATORLEVEL, max_lr=MAX_LR_SEPARATORLEVEL, 
                 path_data_train=path_data / 'train', path_data_val=path_data / 'val',
                 path_model=path_model_separatorLevel, device=DEVICE, replace_dirs=True)
@@ -67,9 +67,9 @@ def run():
     if TASKS['postprocess']:
         path_best_model_separator = BEST_RUN_SEPARATOR if not TASKS['train_separatormodel'] else path_model_separatorLevel / 'model_best.pt'
         # predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
-        #             path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_images=True, out_labels_rows=False)
+        #             path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_images=True, out_labels_rows=False, subtract_one_from_pagenumer=True)
         predict_and_process(path_model_file=path_best_model_separator, path_data=path_data / 'val', device=DEVICE, replace_dirs=True,
-                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_data=False, out_images=False, out_labels_rows=True)
+                    path_pdfs=path_pdfs, path_words=path_words, padding=PADDING, out_data=False, out_images=False, out_labels_rows=True, ground_truth=True, subtract_one_from_pagenumer=True)
 
 if __name__ == '__main__':
     run()

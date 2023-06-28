@@ -40,7 +40,7 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data)
+    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=True, legacy_folder_names=True)
     lossFunctions = getLossFunctions(path_model_file=path_model_file)
 
     # Evaluate
@@ -163,7 +163,7 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
     model = TableSeparatorModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data)
+    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data, ground_truth=True)
     lossFunctions = getLossFunctions_separatorLevel(path_model_file=path_model_file)
 
     # Evaluate

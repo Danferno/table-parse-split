@@ -14,31 +14,46 @@ from model import (Meta, Sample, Features, Targets,
                    COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
 
 class LineDataset(Dataset):
-    def __init__(self, dir_data,
+    def __init__(self, dir_data, ground_truth, legacy_folder_names=False,
                     device='cuda', image_format='.png'):
         # Store in self 
         dir_data = Path(dir_data)
+        self.legacy_folder_names = legacy_folder_names
+        self.ground_truth = ground_truth
         self.device = device
-        self.dir_images = dir_data / 'images'
-        self.dir_features = dir_data / 'features'
-        self.dir_labels = dir_data / 'labels'
-        self.dir_meta = dir_data / 'meta'
+
+        if legacy_folder_names:
+            self.dir_images = dir_data / 'images'
+            self.dir_features = dir_data / 'features'
+            self.dir_labels = dir_data / 'labels'
+            self.dir_meta = dir_data / 'meta'
+        else:
+            self.dir_images = dir_data / 'tables_images'
+            self.dir_features = dir_data / 'features_lineLevel'
+            self.dir_labels = dir_data / 'targets_lineLevel'
+            self.dir_meta = dir_data / 'meta_lineLevel'
         self.image_format = image_format
 
         # Get filepaths
-        self.image_fileEntries = list(os.listdir(self.dir_images))
-        self.feature_fileEntries = list(os.listdir(self.dir_features))
-        self.label_fileEntries = list(os.listdir(self.dir_labels))
-        self.meta_fileEntries = list(os.listdir(self.dir_meta))
+        self.image_fileEntries     = list(os.listdir(self.dir_images))
+        self.feature_fileEntries   = list(os.listdir(self.dir_features))
+        self.meta_fileEntries      = list(os.listdir(self.dir_meta))
+        if self.ground_truth:
+            self.label_fileEntries = list(os.listdir(self.dir_labels))
 
-        items_images   = set([os.path.splitext(file)[0] for file in self.image_fileEntries])
-        items_features = set([os.path.splitext(file)[0] for file in self.feature_fileEntries])
-        items_labels   = set([os.path.splitext(file)[0] for file in self.label_fileEntries])
-        items_meta     = set([os.path.splitext(file)[0] for file in self.meta_fileEntries])
+        items_images     = set([os.path.splitext(file)[0] for file in self.image_fileEntries])
+        items_features   = set([os.path.splitext(file)[0] for file in self.feature_fileEntries])
+        items_meta       = set([os.path.splitext(file)[0] for file in self.meta_fileEntries])
+        if self.ground_truth:
+            items_labels = set([os.path.splitext(file)[0] for file in self.label_fileEntries])
 
         # Verify consistency between image/feature/label
-        self.items = sorted(list(items_images.intersection(items_features).intersection(items_labels).intersection(items_meta)))
-        assert len(self.items) == len(items_images) == len(items_features) == len(items_labels) == len(items_meta), 'Set of images, meta, features and labels do not match.'
+        if ground_truth:
+            self.items = sorted(list(items_images.intersection(items_features).intersection(items_labels).intersection(items_meta)))
+            assert len(self.items) == len(items_images) == len(items_features) == len(items_labels) == len(items_meta), 'Set of images, meta, features and labels do not match.'
+        else:
+            self.items = sorted(list(items_images.intersection(items_features).intersection(items_meta)))
+            assert len(self.items) == len(items_images) == len(items_features) == len(items_meta), 'Set of images, meta and features do not match.'
 
     def __len__(self):
         return len(self.items)  
@@ -58,15 +73,18 @@ class LineDataset(Dataset):
         meta = Meta(path_image=pathImage, **metaData)
 
         # Load sample | Label
-        with open(pathLabel, 'r') as f:
-            labelData = json.load(f)
-        row_targets = torch.tensor(labelData['row'])
-        col_targets = torch.tensor(labelData['col'])
-        row_separator_count = torch.tensor(torch.where(torch.diff(row_targets) == 1)[0].numel(), dtype=torch.int32)
-        col_separator_count = torch.tensor(torch.where(torch.diff(col_targets) == 1)[0].numel(), dtype=torch.int32)
-        
-        targets = Targets(row_line=row_targets.unsqueeze(-1).to(self.device), row_separator_count = row_separator_count.to(self.device),
-                            col_line=col_targets.unsqueeze(-1).to(self.device), col_separator_count = col_separator_count.to(self.device))
+        if self.ground_truth:
+            with open(pathLabel, 'r') as f:
+                labelData = json.load(f)
+            row_targets = torch.tensor(labelData['row'])
+            col_targets = torch.tensor(labelData['col'])
+            row_separator_count = torch.tensor(torch.where(torch.diff(row_targets) == 1)[0].numel(), dtype=torch.int32)
+            col_separator_count = torch.tensor(torch.where(torch.diff(col_targets) == 1)[0].numel(), dtype=torch.int32)
+            
+            targets = Targets(row_line=row_targets.unsqueeze(-1).to(self.device), row_separator_count = row_separator_count.to(self.device),
+                                col_line=col_targets.unsqueeze(-1).to(self.device), col_separator_count = col_separator_count.to(self.device))
+        else:
+            targets = torch.zeros(size=(1,1)).to(self.device)
     
         # Load sample | Features
         with open(pathFeatures, 'r') as f:
@@ -93,16 +111,27 @@ class LineDataset(Dataset):
         return sample
     
 class SeparatorDataset(Dataset):
-    def __init__(self, dir_data, dir_data_all=None, dir_predictions_line=None, device='cuda', image_format='.png'):
+    def __init__(self, dir_data, legacy_folder_names=False, ground_truth=False, dir_data_all=None, dir_predictions_line=None, device='cuda', image_format='.png'):
         # Store in self
         dir_data = Path(dir_data)
         dir_data_all = dir_data_all or dir_data.parent / 'all'
+        self.ground_truth = ground_truth
         self.device = device
-        self.dir_images = dir_data / 'images'
-        self.dir_features = dir_data_all / 'features_separatorLevel'
-        self.dir_targets = dir_data_all / 'targets_separatorLevel'
-        self.dir_predictions_line = dir_predictions_line or dir_data_all / 'predictions_lineLevel'
-        self.dir_meta = dir_data / 'meta'
+        self.dir_images = dir_data / 'tables_images'
+        self.dir_meta_lineLevel = dir_data / 'meta_lineLevel'
+
+        if ground_truth:
+            self.dir_features = dir_data_all / 'features_separatorLevel'
+            self.dir_targets = dir_data_all / 'targets_separatorLevel'
+            self.dir_predictions_line = dir_predictions_line or dir_data_all / 'predictions_lineLevel'
+        else:
+            self.dir_features = dir_data / 'features_separatorLevel'
+            self.dir_predictions_line = dir_predictions_line or dir_data / 'predictions_lineLevel'
+
+        if legacy_folder_names:
+            self.dir_images = dir_data / 'images'
+            self.dir_meta_lineLevel = dir_data / 'meta'
+        
         self.image_format = image_format
 
         # Get items
@@ -130,25 +159,28 @@ class SeparatorDataset(Dataset):
         # Generate paths for specific items
         tableName = self.items[idx]
         path_image = str(self.dir_images / f'{tableName}{self.image_format}')
-        path_meta = str(self.dir_meta / f'{self.items[idx]}.json')
+        path_meta_lineLevel = str(self.dir_meta_lineLevel / f'{self.items[idx]}.json')
         path_features = str(self.dir_features / f'{tableName}.json')
-        path_targets = str(self.dir_targets / f'{tableName}.json')
         path_proposedSeparators = str(self.dir_predictions_line / f'{tableName}.json')
 
         # Load sample
         # Load sample | Meta
-        with open(path_meta, 'r') as f:
+        with open(path_meta_lineLevel, 'r') as f:
             metaData = json.load(f)
         meta = Meta(path_image=path_image, **metaData)
 
         # Load sample | Targets
-        with open(path_targets, 'r') as f:
-            targetData = json.load(f)
-        targets_row = torch.tensor(targetData['row'], dtype=torch.int32)
-        targets_col = torch.tensor(targetData['col'], dtype=torch.int32)
+        if self.ground_truth:
+            path_targets = str(self.dir_targets / f'{tableName}.json')
+            with open(path_targets, 'r') as f:
+                targetData = json.load(f)
+            targets_row = torch.tensor(targetData['row'], dtype=torch.int32)
+            targets_col = torch.tensor(targetData['col'], dtype=torch.int32)
 
-        targets = SeparatorTargets(row=targets_row.unsqueeze(-1).to(self.device),
-                                   col=targets_col.unsqueeze(-1).to(self.device))
+            targets = SeparatorTargets(row=targets_row.unsqueeze(-1).to(self.device),
+                                    col=targets_col.unsqueeze(-1).to(self.device))
+        else:
+            targets = torch.zeros(size=(1,1)).to(self.device)
         
         # Load sample | Features
         with open(path_features, 'r') as f:
@@ -170,7 +202,7 @@ class SeparatorDataset(Dataset):
         sample = Sample(meta=meta, features=features, targets=targets)
         return sample
     
-def get_dataloader_lineLevel(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png') -> DataLoader:
+def get_dataloader_lineLevel(dir_data:Union[Path, str], ground_truth=False, legacy_folder_names=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png') -> DataLoader:
     # Parameters
     dir_data = Path(dir_data)
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
@@ -179,10 +211,10 @@ def get_dataloader_lineLevel(dir_data:Union[Path, str], batch_size:int=1, shuffl
     assert batch_size == 1, 'Batch sizes larger than one currently not supported (clashes with flexible image format)'
 
     # Return dataloader
-    return DataLoader(dataset=LineDataset(dir_data=dir_data, device=device, image_format=image_format),
+    return DataLoader(dataset=LineDataset(dir_data=dir_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, device=device, image_format=image_format),
                       batch_size=batch_size, shuffle=shuffle)
 
-def get_dataloader_separatorLevel(dir_data:Union[Path, str], batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', dir_data_all=None):
+def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', dir_data_all=None):
     # Parameters
     dir_data = Path(dir_data)
     dir_data_all = dir_data_all or dir_data.parent / 'all'
@@ -192,7 +224,7 @@ def get_dataloader_separatorLevel(dir_data:Union[Path, str], batch_size:int=1, s
     assert batch_size == 1, 'Batch sizes larger than one currently not supported (clashes with flexible image format)'
 
     # Return dataloader
-    return DataLoader(dataset=SeparatorDataset(dir_data=dir_data, dir_data_all=dir_data_all, image_format=image_format, device=device), batch_size=batch_size, shuffle=shuffle)
+    return DataLoader(dataset=SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, dir_data_all=dir_data_all, image_format=image_format, device=device), batch_size=batch_size, shuffle=shuffle)
 
 
 if __name__ == '__main__':

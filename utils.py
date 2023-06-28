@@ -19,10 +19,12 @@ import random
 import fitz # type : ignore
 
 import pytesseract
+import imagehash
 
 import time
 from tqdm import tqdm
 from joblib import Parallel, delayed
+from glob import glob
 
 import process
 
@@ -195,7 +197,7 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
     doc:fitz.Document = fitz.open(pdfPath)
 
     # Get words from appropriate pages
-    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers)):        # pageNumber = pageNumbers[0]
+    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers), smoothing=0.2):        # pageNumber = pageNumbers[0]
         # Words | Page | Load page
         page:fitz.Page = doc.load_page(page_id=pageNumber)
         pageName = f'{pdfName}{split_stub_page}{pageNumber}'
@@ -381,7 +383,6 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
             img = Image.alpha_composite(img.convert('RGBA'), img_overlay)
             img.convert('RGB').save(path_out_annotated / f'{pageName}.png')
 
-# Line-level features
 # Line-level features | Helpers
 def yolo_to_fitzBox(yoloPath, targetPdfSize):
     targetWidth, targetHeight = targetPdfSize
@@ -397,40 +398,90 @@ def yolo_to_fitzBox(yoloPath, targetPdfSize):
 
             fitzBoxes.append([x0, y0, x1, y1])
     return fitzBoxes
-
-# Line-level features | Main
-def generate_features_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, path_words=None, path_pdfs=None, path_images=None, path_bboxes=None, replace_dirs='warn',
-                                           split_stub_page='-p', dpi_pymupdf=72, dpi_ocr=300):
-    # Parameters
-    path_out = Path(path_out)
-    path_images = path_images or path_out / 'tables_images'
-    path_bboxes = path_bboxes or path_out / 'tables_bboxes'
-    path_pdfs = path_pdfs or path_out / 'pdfs'
-    path_words = path_words or path_out / 'words'
-
-    # Parse dict
-    pdfName, pageNumbers = pdfNameAndPage
-
-    # Open pdf
-    pdfPath = path_pdfs / f'{pdfName}.pdf'
-    doc:fitz.Document = fitz.open(pdfPath)
-
-    # Features singlepdf | Loop over pages
-    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers)):        # pageNumber = pageNumbers[0]
-        page:fitz.Page = doc.load_page(page_id=pageNumber)
-        pageName = f'{pdfName}{split_stub_page}{pageNumber}'
+def getSpellLengths(inarray):
+        """ run length encoding. Partial credit to R rle function. 
+            Multi datatype arrays catered for including non Numpy
+            returns: runlengths
+            source: https://stackoverflow.com/a/32681075/7909205"""
         
-        # Page | Table bboxes
-        fitzBoxes = yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , targetPdfSize=page.mediabox_size)
+        ia = np.asarray(inarray)                # force numpy
+        n = len(ia)
+        if n == 0: 
+            return (None, None, None)
+        else:
+            y = ia[1:] != ia[:-1]                # pairwise unequal (string safe)
+            i = np.append(np.where(y), n - 1)    # must include last element posi
+            z = np.diff(np.append(-1, i)) / n        # run lengths
+            return z
+def index_to_bboxCross(index, mins, maxes):
+    return ((mins <= index) & (maxes >=index)).sum()
+def convert_01_array_to_visual(array, invert=False, width=40, luminosity_max=240) -> np.array:
+    luminosity = (1 - array) * luminosity_max if invert else array * luminosity_max
+    luminosity = luminosity.round(0).astype(np.uint8)
+    luminosity = np.expand_dims(luminosity, axis=1)
+    luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
+    return luminosity
+def deskew_img_from_file(pageName, img, path_skewfiles):
+    page_skewFiles = glob(f'{pageName}*', root_dir=path_skewfiles)
+    angle_mode = 0
+    if page_skewFiles:
+        angles = []
+        for skewFile in page_skewFiles:
+            with open(skewFile, 'r') as f:
+                angles.append(float(f.readline().strip('\n')))
+        
+        angles, counts = np.unique(angles, return_counts=True)
+        angle_mode = angles[np.argmax(counts)]
+        img = img.rotate(angle_mode, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
 
-        # Page | Text
-        textDf_page = pd.read_parquet(path_words / f'{pageName}.pq')
-        textDf_page.loc[:, ['left', 'right', 'top', 'bottom']] = textDf_page.loc[:, ['left', 'right', 'top', 'bottom']] * (dpi_pymupdf / dpi_ocr)
+    return img, angle_mode
+def calculate_image_similarity(img1, img2):
+    min_dim0 = min(img1.height, img2.height)
+    min_dim1 = min(img1.width, img2.width)
 
-        # Page | Loop over tables
-        for tableIteration, fitzBox in enumerate(fitzBoxes):      # tableIteration = 0; fitzBox = fitzBoxes[tableIteration]
-            ...
+    maxDiscrepancy = max([img1.height-min_dim0, img2.height-min_dim0, img1.width-min_dim1, img2.width-min_dim1])
 
+    if maxDiscrepancy > 20:
+        return 0
+
+    hash1 = imagehash.average_hash(img1)
+    hash2 = imagehash.average_hash(img2)
+
+    distance = hash1 - hash2
+    score = 1 - (distance / len(hash1))
+
+    return score
+def adjust_initialBoundaries_to_betterBoundariesB(arrayInitial, arrayBetter):
+    arrayBetter_idx = 0
+    startBetter, endBetter = arrayBetter[arrayBetter_idx]
+    endBetter_max = arrayBetter[:,1].max()
+
+    for arrayInitial_idx, (startInitial, endInitial) in enumerate(arrayInitial):     # startInitial, endInitial = arrayInitial[0]
+        # Advance to next better boundary: if better boundary is fully to the left of initial boundary
+        while (startInitial > endBetter):
+            arrayBetter_idx += 1
+            try:
+                startBetter, endBetter = arrayBetter[arrayBetter_idx]
+            except IndexError:
+                break
+
+            if (startInitial > endBetter_max):
+                break
+        
+        # Advance to next initial boundary: if better boundary is fully to the right of initial boundary
+        if (endInitial < startBetter):
+            continue
+
+        # Update to better: if initial boundary overlaps better boundary
+        else:
+            arrayInitial[arrayInitial_idx] = (startBetter, endBetter)
+    
+    return arrayInitial
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
 
 def pageWords_to_tableWords(path_words, tableName, metaInfo, tableSplitString='_t'):
     # Technicalities
@@ -502,7 +553,7 @@ def pdfToImages(path_input, path_out, image_format='.jpg', sample_size_pdfs=100,
 
                 if deskew:
                     # Deskew
-                    skewAngle = determine_skew(img, min_angle=0.25, max_angle=5, min_deviation=0.25, num_peaks=20, sigma=10)
+                    skewAngle = determine_skew(img, max_angle=5, min_deviation=0.5, num_peaks=40, sigma=3)
                     img = Image.fromarray(img)
                     if skewAngle:
                         img = img.rotate(skewAngle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
@@ -589,11 +640,35 @@ def detect_to_croppedTable(path_labels, path_images, path_out, padding, image_fo
     # Report meta
     with open(path_meta / 'detectToCroppedTables.json', 'w') as f:
         json.dump(dict(padding=padding, image_format=image_format), fp=f)
+def extractSample(path_data, desired_sample_size, active_learning=False,
+                  path_labels=None, path_images=None, path_annotated_images=None, path_out_sample=None, replace_dirs='warn', image_format='.png'):
+    # Parameters
+    path_labels = path_labels or path_data / 'predictions_separatorLevel' / 'labels_rows'
+    path_images = path_images or path_data / 'tables_images'
+    path_out_sample = path_out_sample or path_data / 'sample'
 
+    makeDirs(path_out_sample / 'images', replaceDirs=replace_dirs)
+    makeDirs(path_out_sample / 'labels', replaceDirs=replace_dirs)
+    makeDirs(path_out_sample / 'annotated_initial', replaceDirs=replace_dirs)
 
-def generate_training_sample(path_pdfs, path_out, sample_size_pdfs, 
-                             path_model_detect, path_model_parse_line, path_model_parse_separator, 
-                             sample_size_tables=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
+    # Sample
+    try:
+        labelFiles = random.sample(os.listdir(path_labels), k=desired_sample_size)
+    except ValueError:
+        labelFiles = os.listdir(path_labels)
+        print(f'Sample size reduced to {len(labelFiles)} (total number of tables processed)')
+
+    # Save to separate folder
+    for labelFile in labelFiles:
+        tableName = os.path.splitext(labelFile)[0]
+        shutil.copyfile(src=path_labels / f'{tableName}.xml', dst=path_out_sample / 'labels' / f'{tableName}.xml')
+        shutil.copyfile(src=path_images / f'{tableName}{image_format}', dst=path_out_sample / 'images' / f'{tableName}{image_format}')
+    
+    tabledetect.utils.visualise_annotation(path_images=path_out_sample / 'images', path_labels=path_out_sample / 'labels', path_output=path_out_sample / 'annotated_initial', annotation_type='tableparse-msft', split_annotation_types=True, as_area=True, n_workers=n_workers)
+
+def generate_training_sample(path_pdfs, path_out, 
+                             sample_size_pdfs, path_model_detect, path_model_parse_line, path_model_parse_separator, 
+                             sample_size_tables=None, desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
                              threshold_detect=0.7, padding_tables=40, 
                              split_stub='-p', active_learning=True, deskew=True, image_format='.png',
                              n_workers=-1, verbosity=logging.INFO):
@@ -630,11 +705,17 @@ def generate_training_sample(path_pdfs, path_out, sample_size_pdfs,
     # Generate cropped+padded tables
     detect_to_croppedTable(path_labels=path_out / 'tables_bboxes', path_images=path_out / 'pages_images', path_out=path_out, padding=padding_tables, image_format=image_format, n_workers=n_workers, max_samples=sample_size_tables, replace_dirs=replace_dirs, verbosity=verbosity)
 
-    # Generate line-level features
-    process.generate_features_lineLevel(path_images=path_out / 'tables_images', path_pdfs=path_out / 'pdfs', path_out=path_out, path_data_skew=path_out / 'meta' / 'skewAngles', replace_dirs=replace_dirs, verbosity=verbosity)
-    ...
+    # Preprocess line-level features
+    process.preprocess_lineLevel(path_images=path_out / 'tables_images', path_pdfs=path_out / 'pdfs', path_out=path_out, path_data_skew=path_out / 'meta' / 'skewAngles', replace_dirs=replace_dirs, verbosity=verbosity)
 
+    # Apply line-level model and preprocess separator-level features
+    process.preprocess_separatorLevel(path_model_line=path_model_parse_line, path_data=path_out, replace_dirs=replace_dirs)
 
+    # Apply separator-level model and process out
+    process.predict_and_process(path_model_file=path_model_parse_separator, path_data=path_out, replace_dirs=replace_dirs, out_data=True, out_images=True, out_labels_rows=True)
+
+    # Zip sample for annotators
+    extractSample(path_data=path_out, desired_sample_size=desired_sample_size, replace_dirs=replace_dirs, active_learning=active_learning, n_workers=n_workers)
 
 
 if __name__ == '__main__':
@@ -643,10 +724,12 @@ if __name__ == '__main__':
     path_models = Path(r'F:\ml-parsing-project\models')
     path_previous_samples = [r'F:\ml-parsing-project\data\parse_activelearning1_jpg\selected']
 
-    n_workers = 1
-    sample_size_pdfs = 2
+    n_workers = -1
+    sample_size_pdfs = 300
+    desired_sample_size = 4000
 
-    generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, sample_size_pdfs=sample_size_pdfs,
+    generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, 
+                             sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
                              n_workers=n_workers,
                              path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
-                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=True, replace_dirs=True)
+                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs=True)

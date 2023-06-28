@@ -43,8 +43,8 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
     # Initialize elements
     model = TableLineModel().to(device)
 
-    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
-    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, shuffle=False, device=device)
+    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, ground_truth=True, legacy_folder_names=True, shuffle=shuffle_train_data, device=device)
+    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, ground_truth=True, legacy_folder_names=True, shuffle=False, device=device)
 
     lossFunctions = defineLossFunctions_lineLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
@@ -181,8 +181,8 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     model = TableSeparatorModel().to(device)
     model.train()
 
-    dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, shuffle=shuffle_train_data, device=device)
-    dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, shuffle=False, device=device)
+    dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, ground_truth=True, shuffle=shuffle_train_data, device=device)
+    dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, ground_truth=True, shuffle=False, device=device)
 
     lossFunctions = defineLossFunctions_separatorLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
