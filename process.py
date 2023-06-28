@@ -21,6 +21,7 @@ from PIL import Image, ImageFont, ImageDraw
 import utils
 from model import TableLineModel, TableSeparatorModel
 import dataloaders
+from joblib import Parallel, delayed
 
 # Constants
 COLOR_CELL = (102, 153, 255, int(0.05*255))      # light blue
@@ -384,7 +385,7 @@ def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cu
 # Line-level | Preprocess | Single PDF
 def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, path_skew=None, path_out_targets=None, path_annotations=None, path_out_images_annotated=None, path_words=None, path_pdfs=None, path_images=None, path_bboxes=None, replace_dirs='warn', image_format='.png',
                                            split_stub_page='-p', split_stub_table='_t', dpi_pymupdf=72, dpi_model=150, dpi_ocr=300, padding=40, draw_images=True,
-                                            ground_truth=False, adjust_targets_to_textboxes=False, add_edge_separators=False, path_images_annotators=None, path_skew_annotators=None):
+                                            ground_truth=False, adjust_targets_to_textboxes=False, add_edge_separators=False, path_images_annotators=None, path_skew_annotators=None, disable_progressbar=False):
     # Parameters
     path_out = Path(path_out)
     path_images = path_images or path_out / 'tables_images'
@@ -411,7 +412,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
     doc:fitz.Document = fitz.open(pdfPath)
 
     # Features singlepdf | Loop over pages
-    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers)):        # pageNumber = pageNumbers[0]
+    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers), disable=disable_progressbar):        # pageNumber = pageNumbers[0]
         page:fitz.Page = doc.load_page(page_id=pageNumber)
         pageName = f'{pdfName}{split_stub_page}{pageNumber}'
         
@@ -583,7 +584,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 # Line-level | Preprocess | Directory level
 def preprocess_lineLevel(path_images, path_pdfs, path_out, path_data_skew=None, 
                                 dpi_ocr=300,
-                                replace_dirs='warn', verbosity=logging.INFO, languages_easyocr=['nl', 'fr', 'de', 'en'], languages_tesseract='nld+fra+deu+eng', gpu=True, split_stub_page='-p', split_stub_table='_t',
+                                replace_dirs='warn', n_workers=-1, verbosity=logging.INFO, languages_easyocr=['nl', 'fr', 'de', 'en'], languages_tesseract='nld+fra+deu+eng', gpu=True, split_stub_page='-p', split_stub_table='_t',
                                 ground_truth=False, draw_images=True,
                                 config_pytesseract_fast = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_fast" --oem 3 --psm 11',
                                 config_pytesseract_legacy = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'):
@@ -592,7 +593,7 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_data_skew=None,
     path_out_features = path_out / 'features_lineLevel'
     path_out_meta_lineLevel = path_out / 'meta_lineLevel'
     path_out_images_annotated = path_out / 'tables_annotated_featuresAndTargets' if ground_truth else path_out / 'tables_annotated_features'       
-    reader = easyocr.Reader(lang_list=languages_easyocr, gpu=gpu, quantize=True)
+    # reader = easyocr.Reader(lang_list=languages_easyocr, gpu=gpu, quantize=True)
 
     # Make folders
     utils.makeDirs(path_out_words, replaceDirs='overwrite')
@@ -606,13 +607,27 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_data_skew=None,
     pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_images, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
 
     # Generate words files and feature files
-    for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), desc='Process line-level | Looping over files', smoothing=0.1):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
-        utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
-                        dpi_ocr=dpi_ocr, reader=reader, split_stub_page=split_stub_page,
-                        languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
-                        draw_images=True)
-        preprocess_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features,
-                                                     replace_dirs=replace_dirs)
+    # TD: add code to start easyocr endpoint
+    if n_workers == 1:
+        for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), desc='Process line-level | Looping over files', smoothing=0.1):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
+            utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
+                            dpi_ocr=dpi_ocr, split_stub_page=split_stub_page,
+                            languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
+                            draw_images=True)
+            preprocess_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features,
+                                                        replace_dirs=replace_dirs)
+    else:
+        results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(utils.pdf_to_words)(
+            pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
+            dpi_ocr=dpi_ocr, split_stub_page=split_stub_page,
+            languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
+            draw_images=True, disable_progressbar=True) 
+            for pdfNameAndPage in pdfNamesAndPages.items())
+        results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(preprocess_lineLevel_singlePdf)(
+            pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features,
+            replace_dirs=replace_dirs, disable_progressbar=True) 
+            for pdfNameAndPage in pdfNamesAndPages.items())
+    
 
 
 # Line-level | Predict
@@ -852,7 +867,10 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Process | Predict | Looping over batches'):
             # Compute prediction
-            preds = model(batch.features)
+            try:
+                preds = model(batch.features)
+            except RuntimeError:
+                continue
 
             # Convert to data
             batch_size = dataloader.batch_size
@@ -1004,10 +1022,13 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                     img_annot = ImageDraw.Draw(table)
                     for cell in cells:
                         # img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill='COLOR_CELL', outline=COLOR_OUTLINE, width=2)
-                        img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill='white', outline='black', width=2)
-                        if cell['text']:
-                            img_annot.rectangle(xy=img_annot.textbbox((cell['x0']+1, cell['y0']+1), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240), width=2)
-                            img_annot.text(xy=(cell['x0']+1, cell['y0']+1), text=cell['text'], fill=(0, 0, 0, 255), anchor='la', font=FONT_TEXT,)
+                        try:
+                            img_annot.rectangle(xy=(cell['x0'], cell['y0'], cell['x1'], cell['y1']), fill='white', outline='black', width=2)
+                            if cell['text']:
+                                img_annot.rectangle(xy=img_annot.textbbox((cell['x0']+1, cell['y0']+1), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240), width=2)
+                                img_annot.text(xy=(cell['x0']+1, cell['y0']+1), text=cell['text'], fill=(0, 0, 0, 255), anchor='la', font=FONT_TEXT,)
+                        except ValueError:
+                            tqdm.write(f'{name_full}: {cell}')
                     img_annot.text(xy=(img.width // 2, img.height - 4), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 230), anchor='md')
                     
                     # Visualise | Save image

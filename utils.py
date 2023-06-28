@@ -4,6 +4,8 @@ import pandas as pd
 import json
 import pickle
 from collections import namedtuple
+import warnings
+from io import BytesIO
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
@@ -12,6 +14,7 @@ import cv2 as cv
 from PIL import Image,  ImageDraw, ImageFont
 from deskew import determine_skew
 import tabledetect
+import requests
 
 from pathlib import Path
 import logging
@@ -93,7 +96,9 @@ def tighten_word_bbox(img_blackIs1, bboxRow, window_emptyrow_relative_factor=5, 
     tall_top = max(0, bboxRow['top']-20)
     tall_bottom = min(img_blackIs1.shape[0], bboxRow['bottom']+20+1)
     tallPixels = img_blackIs1[tall_top:tall_bottom, bboxRow['left']:bboxRow['right']+1]
-    containsLine = (tallPixels.mean(axis=0) >= 0.9)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        containsLine = (tallPixels.mean(axis=0) >= 0.9)
 
     try:
         firstLine = np.where(containsLine)[0][0]
@@ -177,8 +182,8 @@ def harmonise_bbox_height(textDf):
     return textDf
 
 # Pdf to words | Main Function
-def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None, languages_tesseract='nld+fra+deu+eng', dpi_ocr=300, dpi_pymupdf=72, reader=None, split_stub_page='-p', force_new_ocr=False,
-                 config_pytesseract_fast='--oem 3 --psm 11', config_pytesseract_legacy='--oem 0 --psm 11', lineno_gap=5, draw_images=False):
+def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None, languages_tesseract='nld+fra+deu+eng', dpi_ocr=300, dpi_pymupdf=72, reader_endpoint='http://127.0.0.1/easyocr', split_stub_page='-p', force_new_ocr=False,
+                 config_pytesseract_fast='--oem 3 --psm 11', config_pytesseract_legacy='--oem 0 --psm 11', lineno_gap=5, draw_images=False, disable_progressbar=False):
     # Parameters
     path_out_ocr = path_out_words / 'ocr'
     path_out_annotated = path_out_words / 'annotated_words'
@@ -197,7 +202,7 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
     doc:fitz.Document = fitz.open(pdfPath)
 
     # Get words from appropriate pages
-    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers), smoothing=0.2):        # pageNumber = pageNumbers[0]
+    for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers), smoothing=0.2, disable=disable_progressbar):        # pageNumber = pageNumbers[0]
         # Words | Page | Load page
         page:fitz.Page = doc.load_page(page_id=pageNumber)
         pageName = f'{pdfName}{split_stub_page}{pageNumber}'
@@ -259,20 +264,29 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
             # Get words from page | OCR | From Image | EasyOCR
             pathSaved = path_out_ocr / f'{pageName}_easyocr.pkl'
             if not os.path.exists(pathSaved):
+                with BytesIO() as buffer:
+                    pickle.dump(img_array, buffer)
+                    img_array_bytes = buffer.getvalue()
+                response = requests.post(url="http://127.0.0.1:8000/easyocr", files={'img_array_pkl': img_array_bytes}, timeout=60)
                 try:
-                    text = reader.readtext(image=img_array, batch_size=60, detail=1)
-                except OutOfMemoryError:        # type: ignore
-                    page_image_d4 = page.get_pixmap(dpi=int(dpi_ocr/4), alpha=False, colorspace=fitz.csGRAY)
-                    img_d4 = np.frombuffer(page_image_d4.samples, dtype=np.uint8).reshape(page_image_d4.height, page_image_d4.width, page_image_d4.n)
-                    _, img_array_d4 = cv.threshold(np.array(img_d4), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
-                    text_d4 = reader.readtext(image=img_array_d4, batch_size=60, detail=1)
+                    text = pickle.loads(response.content)
+                except pickle.UnpicklingError as e:
+                    print(pathSaved)
+                    raise e
+                # try:
+                #     text = reader.readtext(image=img_array, batch_size=60, detail=1)
+                # except OutOfMemoryError:        # type: ignore
+                #     page_image_d4 = page.get_pixmap(dpi=int(dpi_ocr/4), alpha=False, colorspace=fitz.csGRAY)
+                #     img_d4 = np.frombuffer(page_image_d4.samples, dtype=np.uint8).reshape(page_image_d4.height, page_image_d4.width, page_image_d4.n)
+                #     _, img_array_d4 = cv.threshold(np.array(img_d4), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+                #     text_d4 = reader.readtext(image=img_array_d4, batch_size=60, detail=1)
                     
-                    text = []
-                    for d4 in text_d4:      # d4 = text_d4[0]
-                        bbox = d4[0]
-                        bbox = [[x*4 for x in L] for L in bbox]
-                        d1 = (bbox, *d4[1:])
-                        text.append(d1)
+                #     text = []
+                #     for d4 in text_d4:      # d4 = text_d4[0]
+                #         bbox = d4[0]
+                #         bbox = [[x*4 for x in L] for L in bbox]
+                #         d1 = (bbox, *d4[1:])
+                #         text.append(d1)
 
 
                 with open(pathSaved, 'wb') as file:
@@ -641,7 +655,7 @@ def detect_to_croppedTable(path_labels, path_images, path_out, padding, image_fo
     with open(path_meta / 'detectToCroppedTables.json', 'w') as f:
         json.dump(dict(padding=padding, image_format=image_format), fp=f)
 def extractSample(path_data, desired_sample_size, active_learning=False,
-                  path_labels=None, path_images=None, path_annotated_images=None, path_out_sample=None, replace_dirs='warn', image_format='.png'):
+                  path_labels=None, path_images=None, path_annotated_images=None, path_out_sample=None, n_workers=-1, replace_dirs='warn', image_format='.png'):
     # Parameters
     path_labels = path_labels or path_data / 'predictions_separatorLevel' / 'labels_rows'
     path_images = path_images or path_data / 'tables_images'
@@ -705,8 +719,8 @@ def generate_training_sample(path_pdfs, path_out,
     # Generate cropped+padded tables
     detect_to_croppedTable(path_labels=path_out / 'tables_bboxes', path_images=path_out / 'pages_images', path_out=path_out, padding=padding_tables, image_format=image_format, n_workers=n_workers, max_samples=sample_size_tables, replace_dirs=replace_dirs, verbosity=verbosity)
 
-    # Preprocess line-level features
-    process.preprocess_lineLevel(path_images=path_out / 'tables_images', path_pdfs=path_out / 'pdfs', path_out=path_out, path_data_skew=path_out / 'meta' / 'skewAngles', replace_dirs=replace_dirs, verbosity=verbosity)
+    Preprocess line-level features
+    process.preprocess_lineLevel(path_images=path_out / 'tables_images', path_pdfs=path_out / 'pdfs', path_out=path_out, path_data_skew=path_out / 'meta' / 'skewAngles', replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
 
     # Apply line-level model and preprocess separator-level features
     process.preprocess_separatorLevel(path_model_line=path_model_parse_line, path_data=path_out, replace_dirs=replace_dirs)
@@ -724,7 +738,7 @@ if __name__ == '__main__':
     path_models = Path(r'F:\ml-parsing-project\models')
     path_previous_samples = [r'F:\ml-parsing-project\data\parse_activelearning1_jpg\selected']
 
-    n_workers = -1
+    n_workers = -2
     sample_size_pdfs = 300
     desired_sample_size = 4000
 
