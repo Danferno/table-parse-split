@@ -679,6 +679,29 @@ def extractSample(path_data, desired_sample_size, active_learning=False,
         shutil.copyfile(src=path_images / f'{tableName}{image_format}', dst=path_out_sample / 'images' / f'{tableName}{image_format}')
     
     tabledetect.utils.visualise_annotation(path_images=path_out_sample / 'images', path_labels=path_out_sample / 'labels', path_output=path_out_sample / 'annotated_initial', annotation_type='tableparse-msft', split_annotation_types=True, as_area=True, n_workers=n_workers)
+def splitSample(path_data, split_size, path_sample=None, image_format='.png', replace_dirs='warn'):
+    # Parameters
+    path_sample = path_sample or path_data / 'sample'
+
+    # Get list of labels
+    labels = list(os.scandir(path_sample / 'labels'))
+    counter = 1
+
+    while labels:
+        try:
+            sample = random.sample(labels, k=split_size)
+        except ValueError:
+            sample = labels
+        filenames = [os.path.splitext(entry.name)[0] for entry in sample]
+        if filenames:
+            makeDirs(path_sample / f'sample_split{counter}' / 'images', replaceDirs=replace_dirs)
+            makeDirs(path_sample / f'sample_split{counter}' / 'labels', replaceDirs=replace_dirs)
+            for filename in tqdm(filenames, desc=f'Copying files into split {counter}', leave=False):
+                shutil.copyfile(src=path_sample / 'images' / f'{filename}{image_format}', dst=path_sample / f'sample_split{counter}' / 'images' / f'{filename}{image_format}')
+                shutil.copyfile(src=path_sample / 'labels' / f'{filename}.xml', dst=path_sample / f'sample_split{counter}' / 'labels' / f'{filename}.xml')
+        counter += 1
+        labels = list(set(labels) - set(sample))
+
 
 def generate_training_sample(path_pdfs, path_out, 
                              sample_size_pdfs, path_model_detect, path_model_parse_line, path_model_parse_separator, 
@@ -719,7 +742,7 @@ def generate_training_sample(path_pdfs, path_out,
     # Generate cropped+padded tables
     detect_to_croppedTable(path_labels=path_out / 'tables_bboxes', path_images=path_out / 'pages_images', path_out=path_out, padding=padding_tables, image_format=image_format, n_workers=n_workers, max_samples=sample_size_tables, replace_dirs=replace_dirs, verbosity=verbosity)
 
-    Preprocess line-level features
+    # Preprocess line-level features
     process.preprocess_lineLevel(path_images=path_out / 'tables_images', path_pdfs=path_out / 'pdfs', path_out=path_out, path_data_skew=path_out / 'meta' / 'skewAngles', replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
 
     # Apply line-level model and preprocess separator-level features
@@ -730,6 +753,9 @@ def generate_training_sample(path_pdfs, path_out,
 
     # Zip sample for annotators
     extractSample(path_data=path_out, desired_sample_size=desired_sample_size, replace_dirs=replace_dirs, active_learning=active_learning, n_workers=n_workers)
+
+    # Split sample
+    splitSample(path_data=path_out, split_size=1000)
 
 
 if __name__ == '__main__':
@@ -746,4 +772,4 @@ if __name__ == '__main__':
                              sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
                              n_workers=n_workers,
                              path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
-                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs=True)
+                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs='warn')
