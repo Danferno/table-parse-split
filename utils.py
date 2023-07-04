@@ -788,13 +788,13 @@ def generate_training_sample(path_pdfs, path_out,
     process.preprocess_separatorLevel(path_model_line=path_model_parse_line, path_data=path_out, replace_dirs=replace_dirs)
 
     # Apply separator-level model and process out
-    process.predict_and_process(path_model_file=path_model_parse_separator, path_data=path_out, replace_dirs=replace_dirs, out_data=True, out_images=True, out_labels_rows=True)
+    process.predict_and_process(path_model_file=path_model_parse_separator, path_data=path_out, replace_dirs=replace_dirs, out_data=False, out_images=False, out_labels_rows=True)
 
     # Zip sample for annotators
     extractSample(path_data=path_out, desired_sample_size=desired_sample_size, replace_dirs=replace_dirs, active_learning=active_learning, n_workers=n_workers, respect_existing_sample=respect_existing_sample)
 
     # Split sample
-    splitSample(path_data=path_out, split_size=1000, respect_existing_sample=respect_existing_sample)
+    splitSample(path_data=path_out, split_size=1000, respect_existing_sample=respect_existing_sample, replace_dirs=replace_dirs)
 
 
 if __name__ == '__main__':
@@ -806,9 +806,10 @@ if __name__ == '__main__':
     n_workers = -2
     sample_size_pdfs = 300
     desired_sample_size = 4000
+    replace_existing_sample = True
 
     generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, 
-                             respect_existing_sample=True, sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
+                             respect_existing_sample=replace_existing_sample, sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
                              n_workers=n_workers,
                              path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
-                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs='warn')
+                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs=True)
