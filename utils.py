@@ -654,58 +654,99 @@ def detect_to_croppedTable(path_labels, path_images, path_out, padding, image_fo
     # Report meta
     with open(path_meta / 'detectToCroppedTables.json', 'w') as f:
         json.dump(dict(padding=padding, image_format=image_format), fp=f)
-def extractSample(path_data, desired_sample_size, active_learning=False,
+def extractSample(path_data, desired_sample_size, respect_existing_sample=False, active_learning=False,
                   path_labels=None, path_images=None, path_annotated_images=None, path_out_sample=None, n_workers=-1, replace_dirs='warn', image_format='.png'):
     # Parameters
     path_labels = path_labels or path_data / 'predictions_separatorLevel' / 'labels_rows'
     path_images = path_images or path_data / 'tables_images'
     path_out_sample = path_out_sample or path_data / 'sample'
 
+    # Get existing sample info
+    if respect_existing_sample:
+        print(f'Respecting existing sample at {path_out_sample / "labels"}')
+        labelFiles = os.listdir(path_out_sample / 'labels')
+
+    else:
+        print(f'Extracting sample of {desired_sample_size} from {len(os.listdir(path_labels))}')
+
+        # Sample
+        try:
+            labelFiles = random.sample(os.listdir(path_labels), k=desired_sample_size)
+        except ValueError:
+            labelFiles = os.listdir(path_labels)
+            print(f'Sample size reduced to {len(labelFiles)} (total number of tables processed)')
+
     makeDirs(path_out_sample / 'images', replaceDirs=replace_dirs)
     makeDirs(path_out_sample / 'labels', replaceDirs=replace_dirs)
     makeDirs(path_out_sample / 'annotated_initial', replaceDirs=replace_dirs)
 
-    # Sample
-    try:
-        labelFiles = random.sample(os.listdir(path_labels), k=desired_sample_size)
-    except ValueError:
-        labelFiles = os.listdir(path_labels)
-        print(f'Sample size reduced to {len(labelFiles)} (total number of tables processed)')
-
     # Save to separate folder
-    for labelFile in labelFiles:
+    errors = 0
+    for labelFile in tqdm(labelFiles, desc='Utils | Copying sample files'):
         tableName = os.path.splitext(labelFile)[0]
-        shutil.copyfile(src=path_labels / f'{tableName}.xml', dst=path_out_sample / 'labels' / f'{tableName}.xml')
-        shutil.copyfile(src=path_images / f'{tableName}{image_format}', dst=path_out_sample / 'images' / f'{tableName}{image_format}')
+        if os.path.exists(path_labels / f'{tableName}.xml') and os.path.exists(path_images / f'{tableName}{image_format}'):
+            shutil.copyfile(src=path_labels / f'{tableName}.xml', dst=path_out_sample / 'labels' / f'{tableName}.xml')
+            shutil.copyfile(src=path_images / f'{tableName}{image_format}', dst=path_out_sample / 'images' / f'{tableName}{image_format}')
+        else:
+            errors += 1
+            print(f'{tableName} not found')
     
+    if errors:
+        print(f'Files missing when extracting sample: {errors}')
+
+    # Visualise annotations
     tabledetect.utils.visualise_annotation(path_images=path_out_sample / 'images', path_labels=path_out_sample / 'labels', path_output=path_out_sample / 'annotated_initial', annotation_type='tableparse-msft', split_annotation_types=True, as_area=True, n_workers=n_workers)
-def splitSample(path_data, split_size, path_sample=None, image_format='.png', replace_dirs='warn'):
+def splitSample(path_data, split_size, respect_existing_sample=False, path_sample=None, image_format='.png', replace_dirs='warn'):
     # Parameters
     path_sample = path_sample or path_data / 'sample'
 
-    # Get list of labels
-    labels = list(os.scandir(path_sample / 'labels'))
-    counter = 1
+    if respect_existing_sample:
+        splitFolders = [splitFolder.replace('\\', '') for splitFolder in glob('sample_split*/', root_dir=path_sample)]
+        errors = 0
+        for splitFolder in splitFolders:        # splitFolder = next(iter(splitFolders))
+            path_split = path_sample / splitFolder
+            counter = splitFolder.split('_split')[-1]
+            sample = os.scandir(path_split / 'labels')
 
-    while labels:
-        try:
-            sample = random.sample(labels, k=split_size)
-        except ValueError:
-            sample = labels
-        filenames = [os.path.splitext(entry.name)[0] for entry in sample]
-        if filenames:
-            makeDirs(path_sample / f'sample_split{counter}' / 'images', replaceDirs=replace_dirs)
-            makeDirs(path_sample / f'sample_split{counter}' / 'labels', replaceDirs=replace_dirs)
-            for filename in tqdm(filenames, desc=f'Copying files into split {counter}', leave=False):
-                shutil.copyfile(src=path_sample / 'images' / f'{filename}{image_format}', dst=path_sample / f'sample_split{counter}' / 'images' / f'{filename}{image_format}')
-                shutil.copyfile(src=path_sample / 'labels' / f'{filename}.xml', dst=path_sample / f'sample_split{counter}' / 'labels' / f'{filename}.xml')
-        counter += 1
-        labels = list(set(labels) - set(sample))
+            filenames = [os.path.splitext(entry.name)[0] for entry in sample]
+            if filenames:
+                makeDirs(path_sample / f'sample_split{counter}' / 'images', replaceDirs=replace_dirs)
+                makeDirs(path_sample / f'sample_split{counter}' / 'labels', replaceDirs=replace_dirs)
+                for filename in tqdm(filenames, desc=f'Copying files into split {counter}', leave=False):
+                    if os.path.exists(path_sample / 'images' / f'{filename}{image_format}') and os.path.exists(path_sample / 'labels' / f'{filename}.xml'):
+                        shutil.copyfile(src=path_sample / 'images' / f'{filename}{image_format}', dst=path_sample / f'sample_split{counter}' / 'images' / f'{filename}{image_format}')
+                        shutil.copyfile(src=path_sample / 'labels' / f'{filename}.xml', dst=path_sample / f'sample_split{counter}' / 'labels' / f'{filename}.xml')
+                    else:
+                        errors += 1
+                        tqdm.write(f'{filename} not found')
+            
+        if errors:
+            print(f'Files missing when splitting sample: {errors}')
+    else:
+        # Get list of labels
+        labels = list(os.scandir(path_sample / 'labels'))
+        counter = 1
+
+        while labels:
+            try:
+                sample = random.sample(labels, k=split_size)
+            except ValueError:
+                sample = labels
+
+            filenames = [os.path.splitext(entry.name)[0] for entry in sample]
+            if filenames:
+                makeDirs(path_sample / f'sample_split{counter}' / 'images', replaceDirs=replace_dirs)
+                makeDirs(path_sample / f'sample_split{counter}' / 'labels', replaceDirs=replace_dirs)
+                for filename in tqdm(filenames, desc=f'Copying files into split {counter}', leave=False):
+                    shutil.copyfile(src=path_sample / 'images' / f'{filename}{image_format}', dst=path_sample / f'sample_split{counter}' / 'images' / f'{filename}{image_format}')
+                    shutil.copyfile(src=path_sample / 'labels' / f'{filename}.xml', dst=path_sample / f'sample_split{counter}' / 'labels' / f'{filename}.xml')
+            counter += 1
+            labels = list(set(labels) - set(sample))
 
 
 def generate_training_sample(path_pdfs, path_out, 
                              sample_size_pdfs, path_model_detect, path_model_parse_line, path_model_parse_separator, 
-                             sample_size_tables=None, desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
+                             respect_existing_sample=False, sample_size_tables=None, desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
                              threshold_detect=0.7, padding_tables=40, 
                              split_stub='-p', active_learning=True, deskew=True, image_format='.png',
                              n_workers=-1, verbosity=logging.INFO):
@@ -716,10 +757,6 @@ def generate_training_sample(path_pdfs, path_out,
     # Parse paths
     path_pdfs = Path(path_pdfs); path_out = Path(path_out)
     exclude_pdfs_by_image_folder_list = [Path(folder) for folder in exclude_pdfs_by_image_folder_list]
-
-    # Create folders
-    makeDirs(path_out / 'meta', replaceDirs=replace_dirs)
-    makeDirs(path_out / 'tables_bboxes', replaceDirs=replace_dirs)
 
     # Optional: Get list of pdfs to exclude from sampling
     pdf_exclude_list = []
@@ -732,9 +769,11 @@ def generate_training_sample(path_pdfs, path_out,
     pdf_exclude_list = [f'{name}.pdf' for name in pdf_exclude_list]
 
     # Sample pdfs
+    makeDirs(path_out / 'meta', replaceDirs=replace_dirs)
     pdfToImages(path_input=path_pdfs, path_out=path_out, image_format='.png', sample_size_pdfs=sample_size_pdfs, replace_dirs=replace_dirs, n_workers=n_workers, deskew=deskew)
 
     # Detect tables
+    makeDirs(path_out / 'tables_bboxes', replaceDirs=replace_dirs)
     tabledetect.detect_table(path_weights=path_model_detect, path_input=path_out / 'pages_images', path_output=path_out / 'temp', image_format='.png', threshold_confidence=threshold_detect, save_visual_output=False)
     shutil.copytree(src=path_out / 'temp' / 'out' / 'table-detect' / 'labels', dst=path_out / 'tables_bboxes', dirs_exist_ok=True)
     shutil.rmtree(path_out / 'temp')
@@ -752,10 +791,10 @@ def generate_training_sample(path_pdfs, path_out,
     process.predict_and_process(path_model_file=path_model_parse_separator, path_data=path_out, replace_dirs=replace_dirs, out_data=True, out_images=True, out_labels_rows=True)
 
     # Zip sample for annotators
-    extractSample(path_data=path_out, desired_sample_size=desired_sample_size, replace_dirs=replace_dirs, active_learning=active_learning, n_workers=n_workers)
+    extractSample(path_data=path_out, desired_sample_size=desired_sample_size, replace_dirs=replace_dirs, active_learning=active_learning, n_workers=n_workers, respect_existing_sample=respect_existing_sample)
 
     # Split sample
-    splitSample(path_data=path_out, split_size=1000)
+    splitSample(path_data=path_out, split_size=1000, respect_existing_sample=respect_existing_sample)
 
 
 if __name__ == '__main__':
@@ -769,7 +808,7 @@ if __name__ == '__main__':
     desired_sample_size = 4000
 
     generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, 
-                             sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
+                             respect_existing_sample=True, sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
                              n_workers=n_workers,
                              path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
                              exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs='warn')
