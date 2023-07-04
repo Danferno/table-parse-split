@@ -417,7 +417,8 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
         pageName = f'{pdfName}{split_stub_page}{pageNumber}'
         
         # Page | Table bboxes
-        fitzBoxes = utils.yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , targetPdfSize=page.mediabox_size)
+        page_mediabox_size = page.mediabox_size if page.rotation in [0, 180] else fitz.Point(page.mediabox_size[1], page.mediabox_size[0])
+        fitzBoxes = utils.yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , targetPdfSize=page_mediabox_size)
 
         # Page | Angle
         try:
@@ -434,7 +435,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
         for tableIteration, fitzBox in enumerate(fitzBoxes):      # tableIteration = 0; fitzBox = fitzBoxes[tableIteration]
             # Table
             tableName = f'{pageName}{split_stub_table}{tableIteration}'
-            tableRect = fitz.Rect(fitzBox)
+            tableRect = fitz.Rect([round(coord) for coord in fitzBox])
 
             # Table | Img
             img = Image.open(path_images / f'{tableName}{image_format}')
@@ -906,7 +907,8 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                 # Extract image from pdf
                 pdf = fitz.open(path_pdfs / name_pdf)
                 page = pdf.load_page(pageNumber)
-                img = page.get_pixmap(dpi=dpi_words, clip=(tableRect.x0, tableRect.y0, tableRect.x1, tableRect.y1), colorspace=fitz.csGRAY)
+                tableRect_fitz = fitz.IRect(round(tableRect.x0), round(tableRect.y0), round(tableRect.x1), round(tableRect.y1))
+                img = page.get_pixmap(dpi=dpi_words, clip=tableRect_fitz, colorspace=fitz.csGRAY)
                 img = np.frombuffer(img.samples, dtype=np.uint8).reshape(img.height, img.width, img.n)
                 _, img_array = cv.threshold(np.array(img), 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
                 img_tight = Image.fromarray(img_array)
@@ -914,7 +916,7 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                 img = Image.new(img_tight.mode, (int(img_tight.width+padding*2*scale_factor), int(img_tight.height+padding*2*scale_factor)), 255)
                 img.paste(img_tight, (int(padding*scale_factor), int(padding*scale_factor)))
                 img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)     
-
+                
                 # Cells
                 # Cells | Convert predictions to boundaries
                 separators_row = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_row[sampleNumber]) if preds.row[sampleNumber][idx] >= truth_threshold])
