@@ -1046,8 +1046,8 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                 
                 # Labels | Rows, columns and separators
                 if out_labels_rows:
-                    rows = np.column_stack((separators_row_wide[:-1, 1], separators_row_wide[1:, 0]))
-                    cols = np.column_stack((separators_col_wide[:-1, 1], separators_col_wide[1:, 0]))
+                    rows = np.sort(np.column_stack((separators_row_wide[:-1, 1], separators_row_wide[1:, 0])), axis=1)
+                    cols = np.sort(np.column_stack((separators_col_wide[:-1, 1], separators_col_wide[1:, 0])), axis=1)
                     tableBbox = dict(xmin=cols.min(), xmax=cols.max(), ymin=rows.min(), ymax=rows.max())
                     tableBbox = {key: str(value) for key, value in tableBbox.items()}
 
