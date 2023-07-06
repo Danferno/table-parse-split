@@ -15,6 +15,7 @@ from PIL import Image,  ImageDraw, ImageFont
 from deskew import determine_skew
 import tabledetect
 import requests
+from requests.adapters import HTTPAdapter, Retry
 
 from pathlib import Path
 import logging
@@ -58,6 +59,8 @@ def makeDirs(path, replaceDirs='warn'):
             replaceDir(path)
         else:
             raise FileExistsError
+def ensure_startsWithDot(inputString):
+    return '.'+inputString if inputString[0] != '.' else inputString
 
 # Pdf to words
 # Pdf to words | Helpers
@@ -71,6 +74,8 @@ def box_intersects_boxList(box, box_targets):
     overlap = any([boxes_intersect(box, box_target=box_target) for box_target in box_targets])
     return overlap
 def tighten_word_bbox(img_blackIs1, bboxRow, window_emptyrow_relative_factor=5, window_emptyrow_window_size=5):
+    np.seterr(all='raise')
+    
     # Get bbox pixels
     pixelsInBbox = img_blackIs1[bboxRow['top']:bboxRow['bottom']+1, bboxRow['left']:bboxRow['right']+1]
 
@@ -182,11 +187,11 @@ def harmonise_bbox_height(textDf):
     return textDf
 
 # Pdf to words | Main Function
-def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None, languages_tesseract='nld+fra+deu+eng', dpi_ocr=300, dpi_pymupdf=72, reader_endpoint='http://127.0.0.1/easyocr', split_stub_page='-p', force_new_ocr=False,
+def pdf_to_words(pdfNameAndPage, path_pdfs, path_words, path_data_skew=None, languages_tesseract='nld+fra+deu+eng', dpi_ocr=300, dpi_pymupdf=72, reader_endpoint='http://127.0.0.1:8000/easyocr', split_stub_page='-p', force_new_ocr=False,
                  config_pytesseract_fast='--oem 3 --psm 11', config_pytesseract_legacy='--oem 0 --psm 11', lineno_gap=5, draw_images=False, disable_progressbar=False):
     # Parameters
-    path_out_ocr = path_out_words / 'ocr'
-    path_out_annotated = path_out_words / 'annotated_words'
+    path_out_ocr = path_words / 'ocr'
+    path_out_annotated = path_words / 'annotated_words'
     if force_new_ocr:
         makeDirs(path_out_ocr, replaceDirs=True)
         makeDirs(path_out_annotated, replaceDirs=True)
@@ -201,12 +206,17 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
     pdfPath = path_pdfs / f'{pdfName}.pdf'
     doc:fitz.Document = fitz.open(pdfPath)
 
+    # Connect to reader endpoint
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=1, method_whitelist=False, status_forcelist=[500, 502, 503, 504])
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+
     # Get words from appropriate pages
     for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers), smoothing=0.2, disable=disable_progressbar):        # pageNumber = pageNumbers[0]
         # Words | Page | Load page
         page:fitz.Page = doc.load_page(page_id=pageNumber)
         pageName = f'{pdfName}{split_stub_page}{pageNumber}'
-        path_out = path_out_words / f'{pageName}.pq'
+        path_out = path_words / f'{pageName}.pq'
         
         # Words | Page | Skip if already parsed
         if os.path.exists(path_out):
@@ -267,7 +277,7 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_out_words, path_data_skew=None,
                 with BytesIO() as buffer:
                     pickle.dump(img_array, buffer)
                     img_array_bytes = buffer.getvalue()
-                response = requests.post(url="http://127.0.0.1:8000/easyocr", files={'img_array_pkl': img_array_bytes}, timeout=60)
+                response = session.post(url=reader_endpoint, files={'img_array_pkl': img_array_bytes}, timeout=180)
                 try:
                     text = pickle.loads(response.content)
                 except pickle.UnpicklingError as e:
@@ -403,7 +413,7 @@ def yolo_to_fitzBox(yoloPath, targetPdfSize):
     fitzBoxes = []
     with open(yoloPath, 'r') as yoloFile:
         for annotationLine in yoloFile:
-            cat, xc, yc, w, h, conf = [float(string.strip('\n')) for string in annotationLine.split(' ')]
+            cat, xc, yc, w, h, *conf = [float(string.strip('\n')) for string in annotationLine.split(' ')]
             
             x0 = (xc - w/2) * targetWidth
             x1 = (xc + w/2) * targetWidth
@@ -435,20 +445,6 @@ def convert_01_array_to_visual(array, invert=False, width=40, luminosity_max=240
     luminosity = np.expand_dims(luminosity, axis=1)
     luminosity = np.broadcast_to(luminosity, shape=(luminosity.shape[0], width))
     return luminosity
-def deskew_img_from_file(pageName, img, path_skewfiles):
-    page_skewFiles = glob(f'{pageName}*', root_dir=path_skewfiles)
-    angle_mode = 0
-    if page_skewFiles:
-        angles = []
-        for skewFile in page_skewFiles:
-            with open(skewFile, 'r') as f:
-                angles.append(float(f.readline().strip('\n')))
-        
-        angles, counts = np.unique(angles, return_counts=True)
-        angle_mode = angles[np.argmax(counts)]
-        img = img.rotate(angle_mode, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
-
-    return img, angle_mode
 def calculate_image_similarity(img1, img2):
     min_dim0 = min(img1.height, img2.height)
     min_dim1 = min(img1.width, img2.width)
@@ -742,7 +738,25 @@ def splitSample(path_data, split_size, respect_existing_sample=False, path_sampl
                     shutil.copyfile(src=path_sample / 'labels' / f'{filename}.xml', dst=path_sample / f'sample_split{counter}' / 'labels' / f'{filename}.xml')
             counter += 1
             labels = list(set(labels) - set(sample))
+def splitData(path_in, trainRatio=0.8, valRatio=0.1, replace_dirs='warn', image_format='.png'):
+    items = [os.path.splitext(entry.name)[0] for entry in os.scandir(path_in / 'images')]
+    random.shuffle(items)
 
+    dataSplit = {}
+    dataSplit['train'], dataSplit['val'], dataSplit['test'] = np.split(items, indices_or_sections=[int(len(items)*trainRatio), int(len(items)*(trainRatio+valRatio))])
+
+    for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
+        destPath = path_in.parent / subgroup
+        makeDirs(destPath / 'images', replaceDirs=replace_dirs)
+        makeDirs(destPath / 'labels', replaceDirs=replace_dirs)
+        makeDirs(destPath / 'features', replaceDirs=replace_dirs)
+        makeDirs(destPath / 'meta', replaceDirs=replace_dirs)
+
+        for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
+            _ = shutil.copyfile(src=path_in / 'images'   / f'{item}{image_format}',  dst=destPath / 'images'   / f'{item}{image_format}')
+            _ = shutil.copyfile(src=path_in / 'labels'   / f'{item}.json', dst=destPath / 'labels'   / f'{item}.json')
+            _ = shutil.copyfile(src=path_in / 'features' / f'{item}.json', dst=destPath / 'features' / f'{item}.json')
+            _ = shutil.copyfile(src=path_in / 'meta'     / f'{item}.json', dst=destPath / 'meta'     / f'{item}.json')
 
 def generate_training_sample(path_pdfs, path_out, 
                              sample_size_pdfs, path_model_detect, path_model_parse_line, path_model_parse_separator, 
@@ -796,20 +810,93 @@ def generate_training_sample(path_pdfs, path_out,
     # Split sample
     splitSample(path_data=path_out, split_size=1000, respect_existing_sample=respect_existing_sample, replace_dirs=replace_dirs)
 
+def train_models(name, info_samples, path_out_data, path_out_model,
+                    replace_dirs='warn', image_format='.png',
+                    n_workers=-1, verbosity=logging.INFO):
+    # Parameters
+    if not isinstance(info_samples, list):
+        info_samples = list(info_samples)
+    path_out_data = Path(path_out_data); path_out_model = Path(path_out_model)
+    image_format = ensure_startsWithDot(image_format)
+    prefix = 'Train models | '
+
+    # Derived
+    path_data_project = path_out_data / name
+
+    # # Collect files
+    # makeDirs(path_data_project, replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'labels', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'table_images', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'table_bboxes', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'pdfs'  , replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'skewAngles'  , replaceDirs=replace_dirs)
+
+    # for sample in tqdm(info_samples, desc=f'{prefix}Gathering data'):
+    #     sample['path_root'] = Path(sample['path_root'])
+    #     shutil.copytree(src=sample['path_root'] / 'labels_tableparse', dst=path_data_project / 'labels', dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'tables_images', dst=path_data_project / 'tables_images', dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'tables_bboxes', dst=path_data_project / 'tables_bboxes', dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'pdfs', dst=path_data_project / 'pdfs'  , dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'meta' / 'skewAngles', dst=path_data_project / 'skewAngles'  , dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'words', dst=path_out_data / 'words'  , dirs_exist_ok=True)
+    
+    # # Harmonize image_format
+    # imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'table_images')]
+    # for imgPath in tqdm(imgPaths, desc=f'{prefix}Harmonizing image formats to {image_format}'):
+    #     if os.path.splitext(imgPath)[-1] != image_format:
+    #         _ = cv.imwrite(imgPath.replace(os.path.splitext(imgPath)[-1], image_format), cv.imread(imgPath, cv.IMREAD_GRAYSCALE))
+    #         os.remove(imgPath)
+    #     else:
+    #         continue
+
+    # Preprocess
+    print(f'{prefix}Preprocess line-level')
+    process.preprocess_lineLevel(ground_truth=True,
+                                 path_out=path_data_project,
+                                 path_images=path_data_project / 'table_images',
+                                 path_pdfs=path_data_project / 'pdfs',
+                                 path_data_skew=path_data_project / 'skewAngles',
+                                 path_words=path_out_data / 'words',
+                                    replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
+    
+    # Split into train/val/test
+    print(f'{prefix}Split into line-level')
+    ...
+
+
 
 if __name__ == '__main__':
-    path_pdfs = r'F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted\2023-05-16\samples_missing_pdfFiles'
-    path_out = r'F:\ml-parsing-project\data\parse_activelearning2_png'
-    path_models = Path(r'F:\ml-parsing-project\models')
-    path_previous_samples = [r'F:\ml-parsing-project\data\parse_activelearning1_jpg\selected']
-
+    TASK = 'train_models'
     n_workers = -2
-    sample_size_pdfs = 300
-    desired_sample_size = 4000
-    replace_existing_sample = True
+    # n_workers = 1
+    PATH_TABLEPARSE = Path(r'F:\ml-parsing-project\table-parse-split')
 
-    generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, 
-                             respect_existing_sample=replace_existing_sample, sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
-                             n_workers=n_workers,
-                             path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
-                             exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs=True)
+    if TASK == 'generate_sample':
+        path_pdfs = r'F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted\2023-05-16\samples_missing_pdfFiles'
+        path_out = r'F:\ml-parsing-project\data\parse_activelearning2_png'
+        path_models = Path(r'F:\ml-parsing-project\models')
+        path_previous_samples = [r'F:\ml-parsing-project\data\parse_activelearning1_jpg\selected']
+
+        sample_size_pdfs = 300
+        desired_sample_size = 4000
+        replace_existing_sample = True
+
+        generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, 
+                                respect_existing_sample=replace_existing_sample, sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
+                                n_workers=n_workers,
+                                path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
+                                exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs=True)
+        
+    if TASK == 'train_models':
+        path_sample2 = Path(r"F:\ml-parsing-project\data\parse_activelearning2_png")
+        info_samples = [dict(path_root = r"F:\ml-parsing-project\data\parse_activelearning1_harmonized",
+                             image_format='.jpg'),
+                        dict(path_root = r"F:\ml-parsing-project\data\parse_activelearning2_png",
+                             image_format='.png')]
+        path_out_data = PATH_TABLEPARSE / 'data'
+        path_out_model = PATH_TABLEPARSE / 'models'
+        name = 'tableparse_round2'
+
+        train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
+                        replace_dirs=True,
+                        n_workers=n_workers)

@@ -383,16 +383,17 @@ def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cu
     ...
 
 # Line-level | Preprocess | Single PDF
-def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, path_skew=None, path_out_targets=None, path_annotations=None, path_out_images_annotated=None, path_words=None, path_pdfs=None, path_images=None, path_bboxes=None, replace_dirs='warn', image_format='.png',
+def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, path_labels=None, path_skew=None, path_out_targets=None, path_out_images_annotated=None, path_words=None, path_pdfs=None, path_images=None, path_bboxes=None, image_format='.png',
                                            split_stub_page='-p', split_stub_table='_t', dpi_pymupdf=72, dpi_model=150, dpi_ocr=300, padding=40, draw_images=True,
                                             ground_truth=False, adjust_targets_to_textboxes=False, add_edge_separators=False, path_images_annotators=None, path_skew_annotators=None, disable_progressbar=False):
     # Parameters
     path_out = Path(path_out)
     path_images = path_images or path_out / 'tables_images'
     path_bboxes = path_bboxes or path_out / 'tables_bboxes'
+    path_labels = path_labels or path_out / 'labels'; path_labels = Path(path_labels)
     path_pdfs = path_pdfs or path_out / 'pdfs'
     path_words = path_words or path_out / 'words'
-    path_annotations = path_annotations or path_out / 'annotations'
+    path_images_annotators = path_images_annotators or path_out / 'tables_images'; path_images_annotators = Path(path_images_annotators)
     path_skew = path_skew or path_out / 'meta' / 'skewAngles'
 
     path_out_features = path_out_features or path_out / 'features_lineLevel'
@@ -410,6 +411,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
     # Open pdf
     pdfPath = path_pdfs / f'{pdfName}.pdf'
     doc:fitz.Document = fitz.open(pdfPath)
+    errors = 0
 
     # Features singlepdf | Loop over pages
     for pageNumber in tqdm(pageNumbers, position=1, leave=False, desc='Words | Looping over pages', total=len(pageNumbers), disable=disable_progressbar):        # pageNumber = pageNumbers[0]
@@ -419,6 +421,9 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
         # Page | Table bboxes
         page_mediabox_size = page.mediabox_size if page.rotation in [0, 180] else fitz.Point(page.mediabox_size[1], page.mediabox_size[0])
         fitzBoxes = utils.yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , targetPdfSize=page_mediabox_size)
+
+        if ground_truth:
+            tableNumbers = [int(os.path.splitext(name.split(split_stub_table)[-1])[0]) for name in glob(pathname=f'{pageName}*', root_dir=path_labels)]
 
         # Page | Angle
         try:
@@ -433,6 +438,9 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
         # Page | Loop over tables
         for tableIteration, fitzBox in enumerate(fitzBoxes):      # tableIteration = 0; fitzBox = fitzBoxes[tableIteration]
+            if ground_truth and (tableIteration not in tableNumbers):
+                continue
+
             # Table
             tableName = f'{pageName}{split_stub_table}{tableIteration}'
             tableRect = fitz.Rect([round(coord) for coord in fitzBox])
@@ -446,22 +454,22 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
                 img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
                 img = Image.new(img_tight.mode, (img_tight.width+padding*2, img_tight.height+padding*2), 255)
                 img.paste(img_tight, (padding, padding))
-                img, angle = utils.deskew_img_from_file(pageName=pageName, img=img, path_skewfiles=path_skew_annotators)            
+                img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
 
                 # Ensure nothing went wrong in table numbering (not always consistent)
-                img_sent_to_annotator = Image.open(path_images_annotators / f'{tableName}.jpg').convert(mode='L')
+                img_sent_to_annotator = Image.open(path_images_annotators / f'{tableName}{image_format}').convert(mode='L')
                 similarity_index = utils.calculate_image_similarity(img1=img, img2=img_sent_to_annotator)
                 skip_table = False
                 if similarity_index < 0.85:
                     # Retry with other tables
                     similarity_indices = {}
                     for tableIteration, _ in enumerate(fitzBoxes):      # tableIteration = next(enumerate(fitzBoxes))[0]
-                        tableRect_temp = fitz.Rect(fitzBoxes[tableIteration]['xy'])
+                        tableRect_temp = fitz.Rect(fitzBoxes[tableIteration])
                         img_tight_temp = page.get_pixmap(dpi=dpi_model, clip=tableRect_temp, alpha=False, colorspace=fitz.csGRAY)
                         img_tight_temp = Image.frombytes(mode='L', size=(img_tight_temp.width, img_tight_temp.height), data=img_tight_temp.samples)
                         img_temp = Image.new(img_tight_temp.mode, (img_tight_temp.width+padding*2, img_tight_temp.height+padding*2), 255)
                         img_temp.paste(img_tight_temp, (padding, padding))
-                        img_temp, angle_temp = utils.deskew_img_from_file(pageName=pageName, img=img_temp, path_skewfiles=path_skew_annotators)            
+                        img_temp = img_temp.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
                         similarity_index = utils.calculate_image_similarity(img1=img_temp, img2=img_sent_to_annotator)
                         similarity_indices[tableIteration] = similarity_index
 
@@ -471,12 +479,12 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
                         skip_table = True
 
                     # Adapt image to most similar (note, do not update tablename!)
-                    tableRect = fitz.Rect(fitzBoxes[most_similar_tableIteration]['xy'])
+                    tableRect = fitz.Rect(fitzBoxes[most_similar_tableIteration])
                     img_tight = page.get_pixmap(dpi=dpi_model, clip=tableRect, alpha=False, colorspace=fitz.csGRAY)
                     img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
                     img = Image.new(img_tight.mode, (img_tight.width+padding*2, img_tight.height+padding*2), 255)
-                    img.paste(img_tight, (padding, padding))             
-                    img, angle = utils.deskew_img_from_file(pageName=pageName, img=img, path_skewfiles=path_skew_annotators)            
+                    img.paste(img_tight, (padding, padding))  
+                    img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)           
 
                 if skip_table:
                     continue
@@ -500,7 +508,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
             # Table | Generate ground truth
             if ground_truth:
-                gt = vocLabels_to_groundTruth(pathTargets=path_annotations, img=img01, features=features, adjust_labels_to_textboxes=adjust_targets_to_textboxes, add_edge_separators=add_edge_separators)
+                gt = vocLabels_to_groundTruth(pathTargets=path_labels / f'{tableName}.xml', img=img01, features=features, adjust_labels_to_textboxes=adjust_targets_to_textboxes, add_edge_separators=add_edge_separators)
                 with open(path_out_targets / f'{tableName}.json', 'w') as f:
                     json.dump(gt, f, cls=utils.NumpyEncoder)
 
@@ -583,50 +591,57 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
 
 # Line-level | Preprocess | Directory level
-def preprocess_lineLevel(path_images, path_pdfs, path_out, path_data_skew=None, 
+def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, path_data_skew=None, path_words=None,
                                 dpi_ocr=300,
                                 replace_dirs='warn', n_workers=-1, verbosity=logging.INFO, languages_easyocr=['nl', 'fr', 'de', 'en'], languages_tesseract='nld+fra+deu+eng', gpu=True, split_stub_page='-p', split_stub_table='_t',
-                                ground_truth=False, draw_images=True,
+                                adjust_targets_to_textboxes=True, ground_truth=False, draw_images=True,
                                 config_pytesseract_fast = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_fast" --oem 3 --psm 11',
                                 config_pytesseract_legacy = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_legacy_best" --oem 0 --psm 11'):
     # Parameters
-    path_out_words = path_out / 'words'
+    path_words = path_words or path_out / 'words'
+    path_labels = path_labels or path_out / 'labels'
     path_out_features = path_out / 'features_lineLevel'
+    path_out_targets = path_out / 'targets_lineLevel'
     path_out_meta_lineLevel = path_out / 'meta_lineLevel'
     path_out_images_annotated = path_out / 'tables_annotated_featuresAndTargets' if ground_truth else path_out / 'tables_annotated_features'       
     # reader = easyocr.Reader(lang_list=languages_easyocr, gpu=gpu, quantize=True)
 
     # Make folders
-    utils.makeDirs(path_out_words, replaceDirs='overwrite')
+    utils.makeDirs(path_words, replaceDirs='overwrite')
     utils.makeDirs(path_out_features, replaceDirs=replace_dirs)
     utils.makeDirs(path_out_meta_lineLevel, replaceDirs=replace_dirs)
     if draw_images:
         utils.makeDirs(path_out_images_annotated, replaceDirs=replace_dirs)
+    if ground_truth:
+        utils.makeDirs(path_out_targets, replaceDirs=replace_dirs)
 
     # Assemble list of pages within pdfs that contain tables
-    pdfNames = set([entry.name.split(split_stub_page)[0] for entry in os.scandir(path_images)])
-    pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_images, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
+    if ground_truth:
+        pdfNames = set([entry.name.split(split_stub_page)[0] for entry in os.scandir(path_labels)])
+        pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_labels, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
+    else:
+        pdfNames = set([entry.name.split(split_stub_page)[0] for entry in os.scandir(path_images)])
+        pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_images, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
 
     # Generate words files and feature files
     # TD: add code to start easyocr endpoint
     if n_workers == 1:
         for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), desc='Process line-level | Looping over files', smoothing=0.1):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
-            utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
+            utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_words=path_words,
                             dpi_ocr=dpi_ocr, split_stub_page=split_stub_page,
                             languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
                             draw_images=True)
-            preprocess_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features,
-                                                        replace_dirs=replace_dirs)
+            preprocess_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, adjust_targets_to_textboxes=adjust_targets_to_textboxes)
     else:
+        print('Process line-level | Looping over files')
         results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(utils.pdf_to_words)(
-            pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_out_words=path_out_words,
+            pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_words=path_words,
             dpi_ocr=dpi_ocr, split_stub_page=split_stub_page,
             languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
             draw_images=True, disable_progressbar=True) 
             for pdfNameAndPage in pdfNamesAndPages.items())
         results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(preprocess_lineLevel_singlePdf)(
-            pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features,
-            replace_dirs=replace_dirs, disable_progressbar=True) 
+            pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, disable_progressbar=True) 
             for pdfNameAndPage in pdfNamesAndPages.items())
     
 
@@ -833,7 +848,7 @@ def preprocess_separatorLevel(path_model_line, path_data, path_words=None, groun
 
 # Inference
 def predict_and_process(path_model_file, path_data, ground_truth=False, path_words=None, path_pdfs=None, device='cuda', replace_dirs='warn', path_processed=None, padding=40, draw_text_scale=1, truth_threshold=0.5,
-                        out_data=True, out_images=False, out_labels_separators=False, out_labels_rows=False, subtract_one_from_pagenumer=False):
+                        out_data=True, out_images=False, out_labels_separators=False, out_labels_rows=False, subtract_one_from_pagenumber=False):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
     path_words = path_words or path_data / 'words'
@@ -885,7 +900,7 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
 
                 name_pdf = f"{name_stem}.pdf"
                 pageNumber = int(name_full.split('-p')[-1].split('_t')[0])
-                if subtract_one_from_pagenumer:
+                if subtract_one_from_pagenumber:
                     pageNumber = pageNumber - 1
                 tableNumber = int(name_full.split('_t')[-1])
 
