@@ -53,7 +53,7 @@ class TableLineModel(nn.Module):
                     linescanner_parameters={'size': 10, 'channels': 2 , 'keepTopX': 5},
                     lag_lead_structure = [-4, -2, -1, 1, 2, 4],
                     hidden_sizes_features=[48, 16], hidden_sizes_separators=[24, 8],
-                    info_variableCount={'common_orientationSpecific': 7, 'common_global': 3, 'row_specific': 2, 'col_specific': 1},
+                    info_variableCount={'common_orientationSpecific': 7+1, 'common_global': 3, 'row_specific': 2, 'col_specific': 1},
                     truth_threshold=0.8, device='cuda'):
         super().__init__()
         # Parameters
@@ -235,10 +235,10 @@ class TableLineModel(nn.Module):
 
 class TableSeparatorModel(nn.Module):
     def __init__(self,
-                    linescanner_parameters={'size': 10, 'channels': 2, 'keepTopX_local': 3, 'keepTopX_global': 3},
+                    linescanner_parameters={'size': 10, 'channels': 3, 'keepTopX_local': 3, 'keepTopX_global': 3},
                     areascanner_parameters={'size': [8, 8], 'channels': 5, 'keepTopX_local': 3},
                     fc_parameters={'hidden_sizes': [16, 8]},
-                    info_variableCount={'common_orientationSpecific': 1},
+                    info_variableCount={'common_orientationSpecific': 2*7+1, 'common_global': 3},
                     device='cuda'):
         super().__init__()
         # Parameters
@@ -246,7 +246,7 @@ class TableSeparatorModel(nn.Module):
         self.linescanner_parameters = linescanner_parameters
         self.areascanner_parameters = areascanner_parameters
         self.fc_parameters = fc_parameters
-        self.fc_parameters['in_features'] = info_variableCount['common_orientationSpecific'] + self.linescanner_parameters['keepTopX_local'] + self.linescanner_parameters['keepTopX_global'] + self.areascanner_parameters['keepTopX_local']*2
+        self.fc_parameters['in_features'] = info_variableCount['common_orientationSpecific'] + info_variableCount['common_global'] + self.linescanner_parameters['keepTopX_local'] + self.linescanner_parameters['keepTopX_global'] + self.areascanner_parameters['keepTopX_local']*2
 
         # Layers
         # Layers | Area scanner

@@ -92,12 +92,18 @@ class LineDataset(Dataset):
 
         # Load sample | Features | Rows
         features_row = torch.cat(tensors=[torch.tensor(featuresData[common_variable.format('row')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=1)
-        features_row = torch.cat([features_row, *[torch.tensor(featuresData[row_variable]).unsqueeze(-1) for row_variable in ROW_VARIABLES]], dim=1)
+        features_row_specific = torch.cat([torch.tensor(featuresData[row_variable]).unsqueeze(-1) for row_variable in ROW_VARIABLES], dim=1)
+        features_row_adhoc = (torch.arange(start=0, end=features_row.shape[0])/features_row.shape[0]).unsqueeze(-1)
+        features_row = torch.cat([features_row, features_row_specific, features_row_adhoc], dim=1)
+
         features_row_global = torch.cat([torch.tensor([featuresData[global_common_variable.format('row')]]).broadcast_to((features_row.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES], dim=1)
 
         # Load sample | Features | Cols
         features_col = torch.cat(tensors=[torch.tensor(featuresData[common_variable.format('col')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=1)
-        features_col = torch.cat([features_col, *[torch.tensor(featuresData[col_variable]).unsqueeze(-1) for col_variable in COL_VARIABLES]], dim=1)
+        features_col_specific = torch.cat([torch.tensor(featuresData[col_variable]).unsqueeze(-1) for col_variable in COL_VARIABLES], dim=1)
+        features_col_adhoc = (torch.arange(start=0, end=features_col.shape[0])/features_col.shape[0]).unsqueeze(-1)
+        features_col = torch.cat([features_col, features_col_specific, features_col_adhoc], dim=1)
+
         features_col_global = torch.cat([torch.tensor([featuresData[global_common_variable.format('col')]]).broadcast_to((features_col.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES], dim=1)
     
         # Load sample | Features | Image (0-1 float)
@@ -189,7 +195,16 @@ class SeparatorDataset(Dataset):
             proposedSeparatorData = json.load(f)
         
         features_row = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('row')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES_SEPARATORLEVEL], dim=-1)
+        features_row_min = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('row')+'_min']).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=-1)
+        features_row_max = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('row')+'_max']).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=-1)
+        features_row_global = torch.cat([torch.tensor([featureData[global_common_variable.format('row')]]).broadcast_to((features_row.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES], dim=1)
+        features_row = torch.cat([features_row, features_row_min, features_row_max, features_row_global], dim=-1)
+
         features_col = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('col')]).unsqueeze(-1) for common_variable in COMMON_VARIABLES_SEPARATORLEVEL], dim=-1)
+        features_col_min = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('col')+'_min']).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=-1)
+        features_col_max = torch.cat(tensors=[torch.tensor(featureData[common_variable.format('col')+'_max']).unsqueeze(-1) for common_variable in COMMON_VARIABLES], dim=-1)
+        features_col_global = torch.cat([torch.tensor([featureData[global_common_variable.format('col')]]).broadcast_to((features_col.shape[0], 1)) for global_common_variable in COMMON_GLOBAL_VARIABLES], dim=1)
+        features_col = torch.cat([features_col, features_col_min, features_col_max, features_col_global], dim=-1)
 
         proposedSeparators_row = torch.tensor(proposedSeparatorData['row_separator_predictions'])
         proposedSeparators_col = torch.tensor(proposedSeparatorData['col_separator_predictions'])

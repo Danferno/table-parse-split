@@ -31,6 +31,8 @@ from joblib import Parallel, delayed
 from glob import glob
 
 import process
+import train
+import evaluate
 
 # Constants
 COLOR_CORRECT = (0, 255, 0, int(0.25*255))
@@ -408,8 +410,9 @@ def pdf_to_words(pdfNameAndPage, path_pdfs, path_words, path_data_skew=None, lan
             img.convert('RGB').save(path_out_annotated / f'{pageName}.png')
 
 # Line-level features | Helpers
-def yolo_to_fitzBox(yoloPath, targetPdfSize):
-    targetWidth, targetHeight = targetPdfSize
+def yolo_to_fitzBox(yoloPath, mediabox, page):
+    targetWidth = mediabox.width if page.rotation in [0, 180] else mediabox.height
+    targetHeight = mediabox.height if page.rotation in [0, 180] else mediabox.width
     fitzBoxes = []
     with open(yoloPath, 'r') as yoloFile:
         for annotationLine in yoloFile:
@@ -738,26 +741,101 @@ def splitSample(path_data, split_size, respect_existing_sample=False, path_sampl
                     shutil.copyfile(src=path_sample / 'labels' / f'{filename}.xml', dst=path_sample / f'sample_split{counter}' / 'labels' / f'{filename}.xml')
             counter += 1
             labels = list(set(labels) - set(sample))
-def splitData(path_in, trainRatio=0.8, valRatio=0.1, replace_dirs='warn', image_format='.png'):
-    items = [os.path.splitext(entry.name)[0] for entry in os.scandir(path_in / 'images')]
-    random.shuffle(items)
-
+def trainValTestSplit(path_data, existing_sample_paths:list=[], trainRatio=0.8, valRatio=0.1, maxVal=None, maxTest=None, replace_dirs='warn', image_format='.png', prefix=''):
+    # Grab items
+    items = [os.path.splitext(entry.name)[0] for entry in os.scandir(path_data / 'targets_lineLevel')]
+    itemCount = len(items)
+    splits = ['train', 'val', 'test']
     dataSplit = {}
-    dataSplit['train'], dataSplit['val'], dataSplit['test'] = np.split(items, indices_or_sections=[int(len(items)*trainRatio), int(len(items)*(trainRatio+valRatio))])
 
+    # Determine train/val/test split
+    if existing_sample_paths:
+        items = set(items)
+        existing_sample_paths = [Path(existing_sample_path) for existing_sample_path in existing_sample_paths]
+        for split in splits:
+            item_scanners = [os.scandir(existing_sample_path / 'splits' / split / 'targets_lineLevel') for existing_sample_path in existing_sample_paths]
+            split_items = set([os.path.splitext(entry.name)[0] for scanner in item_scanners for entry in scanner])
+            dataSplit[split] = items.intersection(split_items)
+            items = items - split_items
+            
+        # Calculate indices for remaining items
+        # .. | Get desired and current counts per split
+        desiredCountPerSplit = dict(train=round(trainRatio * itemCount), val=round(valRatio * itemCount))
+        desiredCountPerSplit['test'] = itemCount - sum(desiredCountPerSplit.values())
+
+        if maxVal:
+            desiredCountPerSplit['val'] = min(maxVal, desiredCountPerSplit['val'])
+        if maxTest:
+            desiredCountPerSplit['test'] = min(maxTest, desiredCountPerSplit['test'])
+
+        currentCountPerSplit = {key: len(value) for key, value in dataSplit.items()}
+        
+        # .. | Fill up from test > val > train
+        def fillUp(split, dataSplit, items):
+            items = list(items)
+            random.shuffle(items)
+            required_addition = desiredCountPerSplit[split] - currentCountPerSplit[split]
+            additions = set(items[:required_addition])
+            dataSplit[split] = dataSplit[split].union(additions)
+            items = set(items) - set(additions)
+
+            return dataSplit, items
+
+        if (desiredCountPerSplit['test'] > currentCountPerSplit['test']) and items:
+            dataSplit, items = fillUp('test', dataSplit, items)
+        if (desiredCountPerSplit['val'] > currentCountPerSplit['val']) and items:
+            dataSplit, items = fillUp('val', dataSplit, items)
+        if items:
+            dataSplit['train'] = dataSplit['train'].union(items)
+
+        assert itemCount == sum([len(value) for value in dataSplit.values()])
+        
+    else:
+        random.shuffle(items)
+        dataSplit['train'], dataSplit['val'], dataSplit['test'] = np.split(items, indices_or_sections=[int(len(items)*trainRatio), int(len(items)*(trainRatio+valRatio))])
+
+    # Copy files to train/val/test split
     for subgroup in dataSplit:      # subgroup = list(dataSplit.keys())[0]
-        destPath = path_in.parent / subgroup
-        makeDirs(destPath / 'images', replaceDirs=replace_dirs)
-        makeDirs(destPath / 'labels', replaceDirs=replace_dirs)
-        makeDirs(destPath / 'features', replaceDirs=replace_dirs)
-        makeDirs(destPath / 'meta', replaceDirs=replace_dirs)
+        destPath = path_data / 'splits' / subgroup
+        makeDirs(destPath / 'tables_images', replaceDirs=replace_dirs)
+        makeDirs(destPath / 'targets_lineLevel', replaceDirs=replace_dirs)
+        makeDirs(destPath / 'features_lineLevel', replaceDirs=replace_dirs)
+        makeDirs(destPath / 'meta_lineLevel', replaceDirs=replace_dirs)
 
-        for item in tqdm(dataSplit[subgroup], desc=f"Copying from all > {subgroup}"):        # item = dataSplit[subgroup][0]
-            _ = shutil.copyfile(src=path_in / 'images'   / f'{item}{image_format}',  dst=destPath / 'images'   / f'{item}{image_format}')
-            _ = shutil.copyfile(src=path_in / 'labels'   / f'{item}.json', dst=destPath / 'labels'   / f'{item}.json')
-            _ = shutil.copyfile(src=path_in / 'features' / f'{item}.json', dst=destPath / 'features' / f'{item}.json')
-            _ = shutil.copyfile(src=path_in / 'meta'     / f'{item}.json', dst=destPath / 'meta'     / f'{item}.json')
+        for item in tqdm(dataSplit[subgroup], desc=f"{prefix}Copying from root > {subgroup}"):        # item = dataSplit[subgroup][0]
+            _ = shutil.copyfile(src=path_data / 'tables_images'   / f'{item}{image_format}',  dst=destPath / 'tables_images'   / f'{item}{image_format}')
+            _ = shutil.copyfile(src=path_data / 'targets_lineLevel'   / f'{item}.json', dst=destPath / 'targets_lineLevel'   / f'{item}.json')
+            _ = shutil.copyfile(src=path_data / 'features_lineLevel' / f'{item}.json', dst=destPath / 'features_lineLevel' / f'{item}.json')
+            _ = shutil.copyfile(src=path_data / 'meta_lineLevel'     / f'{item}.json', dst=destPath / 'meta_lineLevel'     / f'{item}.json')
 
+    # Copy files to all
+    makeDirs(path_data / 'splits' / 'all', replaceDirs=replace_dirs)
+    for subgroup in tqdm(dataSplit, desc=f'{prefix}Copying from subgroups > all'):
+        srcPath = path_data / 'splits' / subgroup
+        _ = shutil.copytree(src=srcPath, dst=path_data / 'splits' / 'all', dirs_exist_ok=True)
+    shutil.rmtree(path_data / 'tables_images')
+    shutil.rmtree(path_data / 'targets_lineLevel')
+    shutil.rmtree(path_data / 'features_lineLevel')
+    shutil.rmtree(path_data / 'meta_lineLevel')
+def fanOutBySplit(path_data, fanout_dirs, source='all', destinations=['train', 'val', 'test'], example_dir='features_lineLevel', prefix=None, replace_dirs='warn'):
+    path_data = Path(path_data)
+    path_source = path_data / source
+    extensions = {fanout_dir: os.path.splitext(next(os.scandir(path_source / fanout_dir)).name)[-1] for fanout_dir in fanout_dirs}
+
+    for destination in destinations:
+        path_dest = path_data / destination
+        sample = [os.path.splitext(entry.name)[0] for entry in os.scandir(path_dest / example_dir)]
+
+        for fanout_dir in tqdm(fanout_dirs, desc=f'{prefix}Copying new directories from all > {destination}'):
+            extension = extensions[fanout_dir]
+            makeDirs(path_dest / fanout_dir, replaceDirs=replace_dirs)
+            for filename in tqdm(sample, desc=f'{prefix} Files', position=-1, leave=False):
+                try:
+                    _ = shutil.copyfile(src=path_source / fanout_dir / f'{filename}{extension}', dst=path_dest / fanout_dir / f'{filename}{extension}')
+                except FileNotFoundError:
+                    pass
+
+    
 def generate_training_sample(path_pdfs, path_out, 
                              sample_size_pdfs, path_model_detect, path_model_parse_line, path_model_parse_separator, 
                              respect_existing_sample=False, sample_size_tables=None, desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
@@ -811,7 +889,9 @@ def generate_training_sample(path_pdfs, path_out,
     splitSample(path_data=path_out, split_size=1000, respect_existing_sample=respect_existing_sample, replace_dirs=replace_dirs)
 
 def train_models(name, info_samples, path_out_data, path_out_model,
-                    replace_dirs='warn', image_format='.png',
+                    existing_sample_paths=[],
+                    epochs_line=100, epochs_separator=100,
+                    replace_dirs='warn', image_format='.png', padding=40, device='cuda',
                     n_workers=-1, verbosity=logging.INFO):
     # Parameters
     if not isinstance(info_samples, list):
@@ -822,12 +902,14 @@ def train_models(name, info_samples, path_out_data, path_out_model,
 
     # Derived
     path_data_project = path_out_data / name
+    path_model_line = path_out_model / f'{name}_line'
+    path_model_separator = path_out_model / f'{name}_separator'
 
-    # # Collect files
+    # Collect files
     # makeDirs(path_data_project, replaceDirs=replace_dirs)
     # makeDirs(path_data_project / 'labels', replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'table_images', replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'table_bboxes', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'tables_images', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'tables_bboxes', replaceDirs=replace_dirs)
     # makeDirs(path_data_project / 'pdfs'  , replaceDirs=replace_dirs)
     # makeDirs(path_data_project / 'skewAngles'  , replaceDirs=replace_dirs)
 
@@ -841,7 +923,7 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     #     shutil.copytree(src=sample['path_root'] / 'words', dst=path_out_data / 'words'  , dirs_exist_ok=True)
     
     # # Harmonize image_format
-    # imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'table_images')]
+    # imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'tables_images')]
     # for imgPath in tqdm(imgPaths, desc=f'{prefix}Harmonizing image formats to {image_format}'):
     #     if os.path.splitext(imgPath)[-1] != image_format:
     #         _ = cv.imwrite(imgPath.replace(os.path.splitext(imgPath)[-1], image_format), cv.imread(imgPath, cv.IMREAD_GRAYSCALE))
@@ -849,19 +931,42 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     #     else:
     #         continue
 
-    # Preprocess
-    print(f'{prefix}Preprocess line-level')
-    process.preprocess_lineLevel(ground_truth=True,
-                                 path_out=path_data_project,
-                                 path_images=path_data_project / 'table_images',
-                                 path_pdfs=path_data_project / 'pdfs',
-                                 path_data_skew=path_data_project / 'skewAngles',
-                                 path_words=path_out_data / 'words',
-                                    replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
+    # # Preprocess: raw > linelevel
+    # print(f'{prefix}Preprocess line-level')
+    # process.preprocess_lineLevel(ground_truth=True, padding=padding,
+    #                              path_out=path_data_project,
+    #                              path_images=path_data_project / 'table_images',
+    #                              path_pdfs=path_data_project / 'pdfs',
+    #                              path_data_skew=path_data_project / 'skewAngles',
+    #                              path_words=path_out_data / 'words',
+    #                                 replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
     
-    # Split into train/val/test
-    print(f'{prefix}Split into line-level')
-    ...
+    # # Split into train/val/test
+    # print(f'{prefix}Split into line-level')
+    # trainValTestSplit(path_in=path_data_project, existing_sample_paths=existing_sample_paths,
+    #                        trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
+
+    # # Train line level model
+    # train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
+    #       replace_dirs=replace_dirs, device=device)
+    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
+    
+    
+    # Preprocess: linelevel > separatorlevel
+    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False)
+    fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel'], prefix=prefix, replace_dirs=replace_dirs)
+    
+    # Train separator level model
+    train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
+                               replace_dirs=replace_dirs, device=device)
+    evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
+
+    # Process out
+    process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
+                    path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True)
+    # train_separatorLevel(profile=False, epochs=EPOCHS_SEPARATORLEVEL, max_lr=MAX_LR_SEPARATORLEVEL, 
+    #         path_data_train=path_data / 'train', path_data_val=path_data / 'val',
+    #         path_model=path_model_separatorLevel, device=DEVICE, replace_dirs=True)
 
 
 
@@ -896,7 +1001,11 @@ if __name__ == '__main__':
         path_out_data = PATH_TABLEPARSE / 'data'
         path_out_model = PATH_TABLEPARSE / 'models'
         name = 'tableparse_round2'
+        existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
+        epochs_line = 3
+        epochs_separator = 3
 
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
-                        replace_dirs=True,
+                        epochs_line=epochs_line, epochs_separator=epochs_separator,
+                        replace_dirs=True, existing_sample_paths=existing_sample_paths,
                         n_workers=n_workers)

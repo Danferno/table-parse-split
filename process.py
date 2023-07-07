@@ -14,6 +14,7 @@ import json
 import os
 from lxml import etree
 import logging
+from math import floor, ceil
 
 from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
@@ -276,7 +277,7 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
 
     # Return
     return img01, img_cv, features
-def vocLabels_to_groundTruth(pathTargets, img, features, adjust_labels_to_textboxes=False, add_edge_separators=False):
+def vocLabels_to_groundTruth(path_labels, img, features, padding, adjust_labels_to_textboxes=False, add_edge_separators=False):
     # Parse textbox-information
     if adjust_labels_to_textboxes:
         row_between_textlines = features['row_between_textlines']
@@ -296,22 +297,36 @@ def vocLabels_to_groundTruth(pathTargets, img, features, adjust_labels_to_textbo
         textline_boundaries_vertical = np.column_stack([np.where(textline_boundaries_vertical == 1)[0], np.where(textline_boundaries_vertical == -1)[0]])      
 
     # Parse xml
-    root = etree.parse(pathTargets)
+    root = etree.parse(path_labels)
     objectCount = len(root.findall('.//object'))
     if objectCount:
-        rows = root.findall('object[name="row separator"]')
-        cols = root.findall('object[name="column separator"]')
-        spanners = root.findall('object[name="spanning cell interior"]')
+        # Find elements
+        rows = root.findall('object[name="table row"]')
+        cols = root.findall('object[name="table column"]')
+        # spanners = root.findall('object[name="table spanning cell"]')
 
-        # Get separator locations
-        row_separators = [(int(row.find('.//ymin').text), int(row.find('.//ymax').text)) for row in rows]
-        row_separators = sorted(row_separators, key= lambda x: x[0])
+        # Parse bboxes
+        # Parse bboxes | Table
+        height, width = img.shape
+        table = dict(xmin=padding, xmax=width-padding, ymin=padding, ymax=height-padding)
 
+        # Parse bboxes | Rows
+        row_edges = [(float(row.find('.//ymin').text), float(row.find('.//ymax').text)) for row in rows]
+        row_edges = sorted(row_edges, key= lambda x: x[0])
+
+        row_separators = [(row_edges[i][1], row_edges[i+1][0]) for i in range(len(row_edges)-1)]
+        row_separators = [(floor(min(tuple)), floor(max(tuple))) for tuple in row_separators]
+        
+        # Parse bboxes | Columns
+        col_edges = [(float(col.find('.//xmin').text), float(col.find('.//xmax').text)) for col in cols]
+        col_edges = sorted(col_edges, key= lambda x: x[0])
+
+        col_separators = [(col_edges[i][1], col_edges[i+1][0]) for i in range(len(col_edges)-1)]
+        col_separators = [(floor(min(tuple))-1, ceil(max(tuple))+1) for tuple in col_separators]
+
+        # Parse bboxes | Adjust to textline boundaries (optional)
         if (adjust_labels_to_textboxes) and (len(textline_boundaries_horizontal) > 0):
             row_separators = utils.adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=row_separators, arrayBetter=textline_boundaries_horizontal)
-
-        col_separators = [(int(col.find('.//xmin').text), int(col.find('.//xmax').text)) for col in cols]
-        col_separators = sorted(col_separators, key= lambda x: x[0])
         if (adjust_labels_to_textboxes) and (len(textline_boundaries_vertical) > 0):
             col_separators = utils.adjust_initialBoundaries_to_betterBoundariesB(arrayInitial=col_separators, arrayBetter=textline_boundaries_vertical)
 
@@ -370,22 +385,16 @@ def vocLabels_to_groundTruth(pathTargets, img, features, adjust_labels_to_textbo
         gt_row = np.zeros(shape=img.shape[0], dtype=np.uint8)
         gt_col = np.zeros(shape=img.shape[1], dtype=np.uint8)
     
-    # Adjust to textboxes
-    gt = {}
-    gt['row'] = gt_row
-    gt['col'] = gt_col
+    # Return as dictionary
+    gt = dict(row=gt_row, col=gt_col)
     return gt
 
 
 # Function
-def detect_from_pdf(path_data, path_out, path_model_file_detect=None, device='cuda', replace_dirs='warn', draw_images=False, padding=40):
-    ''' Detect tables'''
-    ...
-
 # Line-level | Preprocess | Single PDF
 def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, path_labels=None, path_skew=None, path_out_targets=None, path_out_images_annotated=None, path_words=None, path_pdfs=None, path_images=None, path_bboxes=None, image_format='.png',
                                            split_stub_page='-p', split_stub_table='_t', dpi_pymupdf=72, dpi_model=150, dpi_ocr=300, padding=40, draw_images=True,
-                                            ground_truth=False, adjust_targets_to_textboxes=False, add_edge_separators=False, path_images_annotators=None, path_skew_annotators=None, disable_progressbar=False):
+                                            ground_truth=False, adjust_targets_to_textboxes=False, add_edge_separators=False, path_images_annotators=None, disable_progressbar=False):
     # Parameters
     path_out = Path(path_out)
     path_images = path_images or path_out / 'tables_images'
@@ -400,9 +409,9 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
     path_out_targets = path_out_targets or path_out / 'targets_lineLevel'
     path_out_meta_lineLevel = path_out / 'meta_lineLevel'
     if ground_truth:
-        path_out_images_annotated = path_out_images_annotated or path_out / 'tables_annotated_featuresAndTargets'
+        path_out_images_annotated = path_out_images_annotated or path_out / 'tables_annotated' / 'featuresAndTargets'
     else:
-        path_out_images_annotated = path_out_images_annotated or path_out / 'tables_annotated_features'
+        path_out_images_annotated = path_out_images_annotated or path_out / 'tables_annotated' / 'features'
     
 
     # Parse dict
@@ -419,11 +428,10 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
         pageName = f'{pdfName}{split_stub_page}{pageNumber}'
         
         # Page | Table bboxes
-        page_mediabox_size = page.mediabox_size if page.rotation in [0, 180] else fitz.Point(page.mediabox_size[1], page.mediabox_size[0])
-        fitzBoxes = utils.yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , targetPdfSize=page_mediabox_size)
+        fitzBoxes = utils.yolo_to_fitzBox(yoloPath=path_bboxes / f'{pageName}.txt' , mediabox=page.mediabox, page=page)
 
         if ground_truth:
-            tableNumbers = [int(os.path.splitext(name.split(split_stub_table)[-1])[0]) for name in glob(pathname=f'{pageName}*', root_dir=path_labels)]
+            tableNumbers = [int(os.path.splitext(name.split(split_stub_table)[-1])[0]) for name in glob(pathname=f'{pageName}{split_stub_table}*', root_dir=path_labels)]
 
         # Page | Angle
         try:
@@ -446,7 +454,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
             tableRect = fitz.Rect([round(coord) for coord in fitzBox])
 
             # Table | Img
-            img = Image.open(path_images / f'{tableName}{image_format}')
+            img_fromTableImages = Image.open(path_images / f'{tableName}{image_format}')
 
             # Table | Ensure annotator saw same image (table numbering was inconsistent in the past)
             if ground_truth:
@@ -458,9 +466,9 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
                 # Ensure nothing went wrong in table numbering (not always consistent)
                 img_sent_to_annotator = Image.open(path_images_annotators / f'{tableName}{image_format}').convert(mode='L')
-                similarity_index = utils.calculate_image_similarity(img1=img, img2=img_sent_to_annotator)
+                initial_similarity_index = utils.calculate_image_similarity(img1=img, img2=img_sent_to_annotator)
                 skip_table = False
-                if similarity_index < 0.85:
+                if initial_similarity_index < 0.85:
                     # Retry with other tables
                     similarity_indices = {}
                     for tableIteration, _ in enumerate(fitzBoxes):      # tableIteration = next(enumerate(fitzBoxes))[0]
@@ -484,7 +492,10 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
                     img_tight = Image.frombytes(mode='L', size=(img_tight.width, img_tight.height), data=img_tight.samples)
                     img = Image.new(img_tight.mode, (img_tight.width+padding*2, img_tight.height+padding*2), 255)
                     img.paste(img_tight, (padding, padding))  
-                    img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)           
+                    img = img.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
+                    img.save(path_images / f'{tableName}{image_format}')
+                else:
+                    img = img_fromTableImages
 
                 if skip_table:
                     continue
@@ -508,7 +519,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
             # Table | Generate ground truth
             if ground_truth:
-                gt = vocLabels_to_groundTruth(pathTargets=path_labels / f'{tableName}.xml', img=img01, features=features, adjust_labels_to_textboxes=adjust_targets_to_textboxes, add_edge_separators=add_edge_separators)
+                gt = vocLabels_to_groundTruth(path_labels=path_labels / f'{tableName}.xml', img=img01, features=features, adjust_labels_to_textboxes=adjust_targets_to_textboxes, add_edge_separators=add_edge_separators, padding=padding)
                 with open(path_out_targets / f'{tableName}.json', 'w') as f:
                     json.dump(gt, f, cls=utils.NumpyEncoder)
 
@@ -592,7 +603,7 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
 # Line-level | Preprocess | Directory level
 def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, path_data_skew=None, path_words=None,
-                                dpi_ocr=300,
+                                dpi_ocr=300, padding=40,
                                 replace_dirs='warn', n_workers=-1, verbosity=logging.INFO, languages_easyocr=['nl', 'fr', 'de', 'en'], languages_tesseract='nld+fra+deu+eng', gpu=True, split_stub_page='-p', split_stub_table='_t',
                                 adjust_targets_to_textboxes=True, ground_truth=False, draw_images=True,
                                 config_pytesseract_fast = r'--tessdata-dir "C:\Program Files\Tesseract-OCR\tessdata_fast" --oem 3 --psm 11',
@@ -603,7 +614,7 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, pat
     path_out_features = path_out / 'features_lineLevel'
     path_out_targets = path_out / 'targets_lineLevel'
     path_out_meta_lineLevel = path_out / 'meta_lineLevel'
-    path_out_images_annotated = path_out / 'tables_annotated_featuresAndTargets' if ground_truth else path_out / 'tables_annotated_features'       
+    path_out_images_annotated = path_out / 'tables_annotated' / 'featuresAndTargets' if ground_truth else path_out / 'tables_annotated' / 'features'       
     # reader = easyocr.Reader(lang_list=languages_easyocr, gpu=gpu, quantize=True)
 
     # Make folders
@@ -625,23 +636,29 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, pat
 
     # Generate words files and feature files
     # TD: add code to start easyocr endpoint
+    # preprocess_lineLevel_singlePdf(pdfNameAndPage=('2007-15200320', pdfNamesAndPages['2007-15200320']), 
+    #             path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, adjust_targets_to_textboxes=adjust_targets_to_textboxes, padding=padding)
     if n_workers == 1:
         for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), desc='Process line-level | Looping over files', smoothing=0.1):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
             utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_words=path_words,
                             dpi_ocr=dpi_ocr, split_stub_page=split_stub_page,
                             languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
                             draw_images=True)
-            preprocess_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, adjust_targets_to_textboxes=adjust_targets_to_textboxes)
+            preprocess_lineLevel_singlePdf(pdfNameAndPage=pdfNameAndPage, 
+                path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, adjust_targets_to_textboxes=adjust_targets_to_textboxes, padding=padding)
     else:
         print('Process line-level | Looping over files')
+        print('Process line-level | Looping over files | Gathering words')
         results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(utils.pdf_to_words)(
             pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_words=path_words,
             dpi_ocr=dpi_ocr, split_stub_page=split_stub_page,
             languages_tesseract=languages_tesseract, config_pytesseract_fast=config_pytesseract_fast, config_pytesseract_legacy=config_pytesseract_legacy,
             draw_images=True, disable_progressbar=True) 
             for pdfNameAndPage in pdfNamesAndPages.items())
-        results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(preprocess_lineLevel_singlePdf)(
-            pdfNameAndPage=pdfNameAndPage, path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, disable_progressbar=True) 
+        print('Process line-level | Looping over files | Processing pdfs')
+        results = Parallel(n_jobs=n_workers, backend='loky', verbose=verbosity // 2)(delayed(preprocess_lineLevel_singlePdf)(pdfNameAndPage=pdfNameAndPage, 
+                path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, adjust_targets_to_textboxes=adjust_targets_to_textboxes, padding=padding,
+                disable_progressbar=True) 
             for pdfNameAndPage in pdfNamesAndPages.items())
     
 
@@ -689,11 +706,11 @@ def predict_lineLevel(path_model_file, path_data, ground_truth=False, legacy_fol
 def preprocess_separatorLevel(path_model_line, path_data, path_words=None, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
     # Parse parameters
     path_data = Path(path_data)
-    path_words = path_words or path_data / 'words'
+    path_words = path_words or path_data.parent.parent.parent / 'words'
     path_predictions_line = path_predictions_line or path_data / 'predictions_lineLevel'
     path_features_separator = path_features_separator or path_data / 'features_separatorLevel'
     path_targets_separator = path_targets_separator or path_data / 'targets_separatorLevel'
-    path_annotated_images = path_annotated_images or path_data / 'images_annotated_separatorLevel'
+    path_annotated_images = path_annotated_images or path_data / 'tables_annotated_separatorLevel'
     path_meta = path_data / 'meta_lineLevel' if not legacy_folder_names else path_data / 'meta'
 
     # Make folders
@@ -732,7 +749,7 @@ def preprocess_separatorLevel(path_model_line, path_data, path_words=None, groun
 
         # Load | Line level targets
         if ground_truth:
-            with open(path_data / 'labels' / f'{tableName}.json', 'r') as f:
+            with open(path_data / 'targets_lineLevel' / f'{tableName}.json', 'r') as f:
                 targets_lineLevel = json.load(f)
             targets_lineLevel_row = targets_lineLevel['row']
             targets_lineLevel_col = targets_lineLevel['col']
@@ -770,10 +787,23 @@ def preprocess_separatorLevel(path_model_line, path_data, path_words=None, groun
         features['text_between_separators_row'] = [int(len(texts) > 0) for texts in texts_between_separators_row]
         features['text_between_separators_col'] = [int(len(texts) > 0) for texts in texts_between_separators_col]
 
+        # Features | Add line-level features
+        with open(path_data / 'features_lineLevel' / f'{tableName}.json', 'r') as f:
+            features_lineLevel = json.load(f)
+
+        for name, feature in features_lineLevel.items():
+            if isinstance(feature, float):
+                features[name] = feature
+            elif isinstance(feature, list):
+                seps = separators_row if 'row' in name else separators_col
+                features[f'{name}_min'] = np.stack([np.min(feature[sep[0]:sep[1]+1]) for sep in seps])
+                features[f'{name}_max'] = np.stack([np.max(feature[sep[0]:sep[1]+1]) for sep in seps])
+            else:
+                raise Exception(f'Feature {name} is neither list nor float?')
+
         # Features | Save
         with open(path_features_separator / f'{tableName}.json', 'w') as f:
-            json.dump(features, f)    
-
+            json.dump(features, f, cls=utils.NumpyEncoder)    
         
         # Targets
         if ground_truth:

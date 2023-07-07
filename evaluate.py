@@ -40,7 +40,7 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=True, legacy_folder_names=True)
+    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=True)
     lossFunctions = getLossFunctions(path_model_file=path_model_file)
 
     # Evaluate
@@ -77,7 +77,7 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
                         outName = f'{pathImage.stem}.png'
 
                         # Sample data | Features
-                        pathFeatures = pathImage.parent.parent / 'features' / f'{pathImage.stem}.json'
+                        pathFeatures = pathImage.parent.parent / 'features_lineLevel' / f'{pathImage.stem}.json'
                         with open(pathFeatures, 'r') as f:
                             features = json.load(f)
                         features = {key: np.array(value) for key, value in features.items()}

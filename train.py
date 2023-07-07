@@ -29,12 +29,13 @@ def add_weights(model, epoch, writer):
 
 def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
           profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10,
-          replace_dirs='warn'):
+          replace_dirs='warn', legacy_folder_names=False):
     # Parse parameters
     path_model = Path(path_model)
     path_model = path_model if not path_model_add_timestamp else path_model / datetime.now().strftime("%Y_%m_%d__%H_%M")
 
     path_writer = path_writer or f"torchlogs/{path_model.stem}"
+    utils.makeDirs(path_writer, replaceDirs=replace_dirs)
     writer = writer or SummaryWriter(path_writer)
 
     # Create folders
@@ -43,8 +44,8 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
     # Initialize elements
     model = TableLineModel().to(device)
 
-    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, ground_truth=True, legacy_folder_names=True, shuffle=shuffle_train_data, device=device)
-    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, ground_truth=True, legacy_folder_names=True, shuffle=False, device=device)
+    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, ground_truth=True, legacy_folder_names=legacy_folder_names, shuffle=shuffle_train_data, device=device)
+    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, ground_truth=True, legacy_folder_names=legacy_folder_names, shuffle=False, device=device)
 
     lossFunctions = defineLossFunctions_lineLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
@@ -172,6 +173,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     path_model = path_model if not path_model_add_timestamp else path_model / datetime.now().strftime("%Y_%m_%d__%H_%M")
 
     path_writer = path_writer or f"torchlogs/{path_model.stem}"
+    utils.makeDirs(path_writer, replaceDirs=replace_dirs)
     writer = writer or SummaryWriter(path_writer)
 
     # Create folders
