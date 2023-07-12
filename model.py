@@ -36,7 +36,7 @@ Output = namedtuple('output', ORIENTATIONS)
 
 # Named tuples | Line Level
 Sample = namedtuple('sample', ['features', 'targets', 'meta'])
-Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model', 'image_angle'])
+Meta = namedtuple('meta', ['path_image', 'table_coords', 'dpi_pdf', 'dpi_model', 'dpi_words', 'name_stem', 'padding_model', 'image_angle', 'size_image'])
 Features = namedtuple('features', FEATURE_TYPES)
 Targets = namedtuple('target', LOSS_ELEMENTS_LINELEVEL)
 
@@ -178,20 +178,23 @@ class TableLineModel(nn.Module):
         
         # Load features to GPU
         features = Features(**{field: features[i].to(self.device) for i, field in enumerate(Features._fields)})
+
+        # Get batch_size
+        batch_size = features.image.shape[0]
             
         # Image
         # Image | Convolutional layers based on image
         img_intermediate_values = self.layer_conv_img(features.image)
-        row_conv_values = self.layer_conv_avg_row(img_intermediate_values).view(1, -1, self.image_convolution_parameters['channels_final']*self.image_convolution_parameters['pool_count_final'])
-        col_conv_values = self.layer_conv_avg_col(img_intermediate_values).view(1, -1, self.image_convolution_parameters['channels_final']*self.image_convolution_parameters['pool_count_final'])
+        row_conv_values = self.layer_conv_avg_row(img_intermediate_values).view(batch_size, -1, self.image_convolution_parameters['channels_final']*self.image_convolution_parameters['pool_count_final'])
+        col_conv_values = self.layer_conv_avg_col(img_intermediate_values).view(batch_size, -1, self.image_convolution_parameters['channels_final']*self.image_convolution_parameters['pool_count_final'])
 
         # Row
         # Row | Global features
         row_inputs_global = features.row_global
 
-        # Row | Linescanner
+        # Row | Global Linescanner
         row_linescanner_values = self.layer_ls_row(features.image).squeeze(-1)
-        row_linescanner_top5 = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX'], dim=2, sorted=True).values.view(1, -1, self.linescanner_parameters['keepTopX']*self.linescanner_parameters['channels']).broadcast_to((-1, features.image.shape[2], -1))
+        row_linescanner_top5 = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX'], dim=2, sorted=True).values.view(batch_size, -1, self.linescanner_parameters['keepTopX']*self.linescanner_parameters['channels']).broadcast_to((-1, features.image.shape[2], -1))
         
         # Row | Gather features
         row_inputs = torch.cat([features.row, row_conv_values], dim=-1)
@@ -202,16 +205,16 @@ class TableLineModel(nn.Module):
         row_direct_preds = self.layer_linear_row(row_inputs_complete)
 
         # Row | Convolved prediction
-        row_conv_preds = self.layer_conv_preds_row(row_direct_preds.view(1, 1, -1)).view(1, -1, self.preds_convolution_parameters['channels_1'])
+        row_conv_preds = self.layer_conv_preds_row(row_direct_preds.view(batch_size, 1, -1)).view(batch_size, -1, self.preds_convolution_parameters['channels_1'])
         row_preds = self.layer_conv_preds_fc_row(torch.cat([row_direct_preds, row_conv_preds], dim=-1))
 
         # Col
         # Col | Global features
         col_inputs_global = features.col_global
 
-        # Col | Linescanner
+        # Col | Global Linescanner
         col_linescanner_values = self.layer_ls_col(features.image).squeeze(-2)
-        col_linescanner_top5 = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX'], dim=2, sorted=True).values.view(1, -1, self.linescanner_parameters['keepTopX']*self.linescanner_parameters['channels']).broadcast_to((-1, features.image.shape[3], -1))
+        col_linescanner_top5 = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX'], dim=2, sorted=True).values.view(batch_size, -1, self.linescanner_parameters['keepTopX']*self.linescanner_parameters['channels']).broadcast_to((-1, features.image.shape[3], -1))
 
         # Col | Gather features
         col_inputs = torch.cat([features.col, col_conv_values], dim=-1)
@@ -222,7 +225,7 @@ class TableLineModel(nn.Module):
         col_direct_preds = self.layer_linear_col(col_inputs_complete)
 
         # Col | Convolved prediction
-        col_conv_preds = self.layer_conv_preds_col(col_direct_preds.view(1, 1, -1)).view(1, -1, self.preds_convolution_parameters['channels_1'])
+        col_conv_preds = self.layer_conv_preds_col(col_direct_preds.view(batch_size, 1, -1)).view(batch_size, -1, self.preds_convolution_parameters['channels_1'])
         col_preds = self.layer_conv_preds_fc_col(torch.cat([col_direct_preds, col_conv_preds], dim=-1))
         
 

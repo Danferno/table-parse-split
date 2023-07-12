@@ -98,15 +98,30 @@ def getLossFunctions_separatorLevel(path_model_file):
     return lossFunctions
 
 # Loss function | Define weighted loss function
-def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
+def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculateCorrect=False, device='cuda'):   
     loss = torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.float32)
     correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_LINELEVEL_COUNT,1), device=device, dtype=torch.int64)
 
-    for idx_orientation, _ in enumerate(ORIENTATIONS):     # idx = 0; orientation = ORIENTATIONS[idx]
+    length_unpadded = {idx_orientation: sum([shape[orientation] for shape in shapes]) for idx_orientation, orientation in enumerate(ORIENTATIONS)}
+
+    for idx_orientation, orientation in enumerate(ORIENTATIONS):     # idx_orientation = 0; orientation = ORIENTATIONS[idx_orientation]
         # Line
         idx_line = 2*idx_orientation
         target_line = targets[idx_line].to(device)
         pred_line = preds[idx_orientation].to(device)
+
+        # >> fix this and continue. also fix weights of loss function
+        targets = torch.zeros(size=(length_unpadded[idx_orientation],1), device=device, dtype=torch.int8)
+        preds = torch.zeros(size=(length_unpadded[idx_orientation],1), device=device, dtype=torch.float32)
+        next_start = 0
+        for idx_sample in range(target_line.shape[0]):      # idx_sample = 0
+            start = next_start
+            end = start + shapes[idx_sample][orientation]
+            targets[start:end] = target_line[idx_sample, :shapes[idx_sample][orientation]]
+            preds[start:end] = pred_line[idx_sample, :shapes[idx_sample][orientation]]
+
+            next_start = end+1
+            
 
         loss_element = LOSS_ELEMENTS_LINELEVEL[idx_line]
         loss_fn = lossFunctions[loss_element]

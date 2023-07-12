@@ -14,6 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 import matplotlib; matplotlib.use('Agg')
 import numpy as np
+from math import ceil
 
 # Helper functions
 def add_weights(model, epoch, writer, disable=False):
@@ -28,9 +29,9 @@ def add_weights(model, epoch, writer, disable=False):
             plt.xlabel(name)
             writer.add_figure(tag=name, figure=fig, global_step=epoch, close=True)
 
-def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
+def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.1, 
           profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10, disable_weight_visualisation=False,
-          replace_dirs='warn', legacy_folder_names=False):
+          replace_dirs='warn', legacy_folder_names=False, batch_size=1):
     # Parse parameters
     path_model = Path(path_model)
     path_model = path_model if not path_model_add_timestamp else path_model / datetime.now().strftime("%Y_%m_%d__%H_%M")
@@ -45,13 +46,12 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
     # Initialize elements
     model = TableLineModel().to(device)
 
-    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, ground_truth=True, legacy_folder_names=legacy_folder_names, shuffle=shuffle_train_data, device=device)
-    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, ground_truth=True, legacy_folder_names=legacy_folder_names, shuffle=False, device=device)
+    dataloader_train = get_dataloader_lineLevel(dir_data=path_data_train, ground_truth=True, legacy_folder_names=legacy_folder_names, shuffle=shuffle_train_data, device=device, batch_size=batch_size)
+    dataloader_val = get_dataloader_lineLevel(dir_data=path_data_val, ground_truth=True, legacy_folder_names=legacy_folder_names, shuffle=False, device=device, batch_size=batch_size)
 
     lossFunctions = defineLossFunctions_lineLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=len(dataloader_train), epochs=epochs)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=epochs//4, step_size_down=2, mode='triangular', verbose=False)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=ceil(epochs), step_size_down=2, mode='triangular', verbose=False)
 
     # Define single epoch training loop
     def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4, device=device):
@@ -63,7 +63,8 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss
             preds = model(batch.features)
-            loss = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, device=device)
+            lengths = batch.meta.size_image
+            loss = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=lengths, device=device)
             epoch_loss += loss
             
             # Backpropagation
@@ -305,7 +306,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
         writer.close()
 
 if __name__ == '__main__':
-    path_data = Path(r"F:\ml-parsing-project\table-parse-split\data\real_narrow")
-    path_model = Path(r"F:\ml-parsing-project\table-parse-split\models")
-    path_model = path_model / 'test'
-    train_lineLevel(path_data_train=path_data / 'train', path_data_val=path_data / 'val', path_model=path_model, replace_dirs=True)
+    PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
+    path_model = Path(r"F:\ml-parsing-project\table-parse-split\models") / 'batchsize_test'
+    batch_size = 3
+    train_lineLevel(path_data_train=PATH_ROOT / 'val', path_data_val=PATH_ROOT / 'val', path_model=path_model, replace_dirs='warn', batch_size=batch_size)

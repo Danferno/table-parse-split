@@ -7,11 +7,70 @@ from typing import Union
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_image, ImageReadMode
+from torch.nn.functional import pad
+from einops import repeat
+from collections import defaultdict
 
 
 from model import (Meta, Sample, Features, Targets,
                    SeparatorTargets, SeparatorFeatures,
                    COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
+class CollateFn:
+    def __call__(self, batch):
+        # Elements to pad
+        elementsToPad = {'targets': ['row_line', 'col_line'], 'features': ['row', 'col', 'row_global', 'col_global']}
+
+        # Get largest length
+        rowLengths = [sample.features.row.shape[0] for sample in batch]
+        colLengths = [sample.features.col.shape[0] for sample in batch]
+        maxRowLength = max(rowLengths)
+        maxColLength = max(colLengths)
+
+        # Pad
+        newTargets = defaultdict(list)
+        newFeatures = defaultdict(list)
+        newMeta = defaultdict(list)
+        for idx, sample in enumerate(batch):        # idx = 0; sample = newSamples[idx]
+            padLengths = dict(row = maxRowLength - rowLengths[idx], col = maxColLength - colLengths[idx])
+            targets = sample.targets._asdict()
+            features = sample.features._asdict()
+            meta = sample.meta._asdict()
+            img = features['image']
+            
+            # Pad | Targets                        
+            for element in targets.keys():      # element = next(iter(targets.keys()))
+                padLength = padLengths['row'] if 'row' in element else padLengths['col']
+                if element in elementsToPad['targets']:
+                    init = targets[element]
+                    padTensor = repeat(init[-1], pattern='last -> repeat last', repeat=padLength)
+                    newTargets[element].append(torch.concat([init, padTensor]))
+                else:
+                    newTargets[element].append(targets[element])
+
+            # Pad | Features
+            for element in features.keys():      # element = next(iter(features.keys()))
+                padLength = padLengths['row'] if 'row' in element else padLengths['col']
+                if element in elementsToPad['features']:
+                    init = features[element]
+                    padTensor = repeat(init[-1], pattern='last -> repeat last', repeat=padLength)
+                    newFeatures[element].append(torch.concat([init, padTensor]))
+                elif element == 'image':
+                    continue
+                else:
+                    newFeatures[element].append(features[element])
+
+            # Pad | Image
+            newFeatures['image'].append(pad(img, pad=(0, padLengths['col'], 0, padLengths['row']), mode='replicate'))
+
+            # Pad | Meta
+            for element in meta.keys():
+                newMeta[element].append(meta[element])
+
+        # Stack and return
+        return Sample(features=Features(**{key: torch.stack(value) for key, value in newFeatures.items()}),
+                            targets= Targets(**{key: torch.stack(value) for key, value in newTargets.items() }),
+                            meta=Meta(**newMeta))
+
 
 class LineDataset(Dataset):
     def __init__(self, dir_data, ground_truth, legacy_folder_names=False,
@@ -67,11 +126,6 @@ class LineDataset(Dataset):
         pathFeatures = str(self.dir_features / f'{self.items[idx]}.json')
 
         # Load sample
-        # Load sample | Meta
-        with open(pathMeta, 'r') as f:
-            metaData = json.load(f)
-        meta = Meta(path_image=pathImage, **metaData)
-
         # Load sample | Label
         if self.ground_truth:
             with open(pathLabel, 'r') as f:
@@ -108,6 +162,11 @@ class LineDataset(Dataset):
     
         # Load sample | Features | Image (0-1 float)
         image = read_image(pathImage, mode=ImageReadMode.GRAY).to(dtype=torch.float32) / 255
+
+        # Load sample | Meta
+        with open(pathMeta, 'r') as f:
+            metaData = json.load(f)
+        meta = Meta(path_image=pathImage, size_image={'row': image.shape[1], 'col': image.shape[2]}, **metaData)
 
         # Collect in namedtuples
         features = Features(row=features_row, col=features_col, row_global=features_row_global, col_global=features_col_global, image=image)
@@ -170,11 +229,6 @@ class SeparatorDataset(Dataset):
         path_proposedSeparators = str(self.dir_predictions_line / f'{tableName}.json')
 
         # Load sample
-        # Load sample | Meta
-        with open(path_meta_lineLevel, 'r') as f:
-            metaData = json.load(f)
-        meta = Meta(path_image=path_image, **metaData)
-
         # Load sample | Targets
         if self.ground_truth:
             path_targets = str(self.dir_targets / f'{tableName}.json')
@@ -213,6 +267,11 @@ class SeparatorDataset(Dataset):
 
         features = SeparatorFeatures(row=features_row, col=features_col, image=image, proposedSeparators_row=proposedSeparators_row, proposedSeparators_col=proposedSeparators_col)        
 
+        # Load sample | Meta
+        with open(path_meta_lineLevel, 'r') as f:
+            metaData = json.load(f)
+        meta = Meta(path_image=path_image, size_image=image.shape, **metaData)
+
         # Return sample
         sample = Sample(meta=meta, features=features, targets=targets)
         return sample
@@ -222,12 +281,9 @@ def get_dataloader_lineLevel(dir_data:Union[Path, str], ground_truth=False, lega
     dir_data = Path(dir_data)
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
 
-    # Checks
-    assert batch_size == 1, 'Batch sizes larger than one currently not supported (clashes with flexible image format)'
-
     # Return dataloader
     return DataLoader(dataset=LineDataset(dir_data=dir_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, device=device, image_format=image_format),
-                      batch_size=batch_size, shuffle=shuffle)
+                      batch_size=batch_size, shuffle=shuffle, collate_fn=CollateFn())
 
 def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', dir_data_all=None):
     # Parameters
@@ -235,13 +291,13 @@ def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False,
     dir_data_all = dir_data_all or dir_data.parent / 'all'
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
 
-    # Checks
-    assert batch_size == 1, 'Batch sizes larger than one currently not supported (clashes with flexible image format)'
-
     # Return dataloader
     return DataLoader(dataset=SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, dir_data_all=dir_data_all, image_format=image_format, device=device), batch_size=batch_size, shuffle=shuffle)
 
 
 if __name__ == '__main__':
-    PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\real_narrow')
-    get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'train')
+    PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
+    dataloader = get_dataloader_lineLevel(dir_data=PATH_ROOT / 'val', batch_size=3, ground_truth=True)
+
+    batch = next(iter(dataloader))
+    # get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'val')
