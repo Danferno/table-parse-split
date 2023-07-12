@@ -30,7 +30,7 @@ def add_weights(model, epoch, writer, disable=False):
             writer.add_figure(tag=name, figure=fig, global_step=epoch, close=True)
 
 def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.1, 
-          profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10, disable_weight_visualisation=False,
+          profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10, disable_weight_visualisation=True,
           replace_dirs='warn', legacy_folder_names=False, batch_size=1):
     # Parse parameters
     path_model = Path(path_model)
@@ -60,11 +60,10 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         size = len(dataloader.dataset)
         batch_size = dataloader.batch_size
         epoch_loss = 0
-        for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
+        for batchNumber, batch in tqdm(enumerate(dataloader), total=len(dataloader), unit=' batches', smoothing=0.9, position=1, leave=False):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss
             preds = model(batch.features)
-            lengths = batch.meta.size_image
-            loss = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=lengths, device=device)
+            loss = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.size_image, device=device)
             epoch_loss += loss
             
             # Backpropagation
@@ -76,9 +75,9 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
             report_batch_size = (size / batch_size) // report_frequency
             if (batchNumber+1) % report_batch_size == 0:
                 epoch_loss, current = epoch_loss.item(), (batchNumber+1) * batch_size
-                print(f'\tAvg epoch loss: {epoch_loss/current:.3f} [{current:>5d}/{size:>5d}]')
+                tqdm.write(f'\tAvg epoch loss: {epoch_loss/current:.3f} [{current:>5d}/{size:>5d}]')
         
-        print(f'\tEpoch duration: {perf_counter()-start:.0f}s')
+        print(f'\n\tEpoch duration: {perf_counter()-start:.0f}s')
         scheduler.step()
         return epoch_loss / len(dataloader)
     
@@ -90,7 +89,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
             for batch in dataloader:     # batch = next(iter(dataloader))
                 # Compute prediction and loss
                 preds = model(batch.features)
-                val_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, calculateCorrect=True)
+                val_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.size_image, calculateCorrect=True)
                 val_loss += val_loss_batch
                 correct  += correct_batch
                 maxCorrect  += maxCorrect_batch
@@ -165,7 +164,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         writer.add_pr_curve(tag='Train/All', labels=targets, predictions=preds, global_step=epochs, num_thresholds=1024)
 
         # Tensorboard | Add weights histogram
-        add_weights(model=model, epoch=epochs, writer=writer)
+        add_weights(model=model, epoch=epochs, writer=writer, disable=disable_weight_visualisation)
         writer.close()
 
 def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
@@ -308,5 +307,5 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
 if __name__ == '__main__':
     PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
     path_model = Path(r"F:\ml-parsing-project\table-parse-split\models") / 'batchsize_test'
-    batch_size = 3
+    batch_size = 4
     train_lineLevel(path_data_train=PATH_ROOT / 'val', path_data_val=PATH_ROOT / 'val', path_model=path_model, replace_dirs='warn', batch_size=batch_size)

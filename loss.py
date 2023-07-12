@@ -37,7 +37,7 @@ class LogisticLoss(nn.Module):
     def forward(self, input, target):
         distance = torch.abs(target - input)
         loss = self.scale / (1 + torch.exp(-0.5*distance)) - self.limit_upper
-        return loss
+        return torch.mean(loss)
 
 # Calculate weights to compensate for separator imbalance
 def __calculateWeightsFromTargets(targets):    
@@ -110,19 +110,18 @@ def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculat
         target_line = targets[idx_line].to(device)
         pred_line = preds[idx_orientation].to(device)
 
-        # >> fix this and continue. also fix weights of loss function
-        targets = torch.zeros(size=(length_unpadded[idx_orientation],1), device=device, dtype=torch.int8)
-        preds = torch.zeros(size=(length_unpadded[idx_orientation],1), device=device, dtype=torch.float32)
+        # Skip batch-homogeneity-padding
+        targets_unpadded = torch.zeros(size=(length_unpadded[idx_orientation],1), device=device, dtype=torch.int8)
+        preds_unpadded = torch.zeros(size=(length_unpadded[idx_orientation],1), device=device, dtype=torch.float32)
         next_start = 0
         for idx_sample in range(target_line.shape[0]):      # idx_sample = 0
             start = next_start
             end = start + shapes[idx_sample][orientation]
-            targets[start:end] = target_line[idx_sample, :shapes[idx_sample][orientation]]
-            preds[start:end] = pred_line[idx_sample, :shapes[idx_sample][orientation]]
+            targets_unpadded[start:end] = target_line[idx_sample, :shapes[idx_sample][orientation]]
+            preds_unpadded[start:end] = pred_line[idx_sample, :shapes[idx_sample][orientation]]
 
-            next_start = end+1
+            next_start = end
             
-
         loss_element = LOSS_ELEMENTS_LINELEVEL[idx_line]
         loss_fn = lossFunctions[loss_element]
         loss[idx_line] = loss_fn(pred_line, target_line)
@@ -135,15 +134,16 @@ def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculat
         idx_count = 2*idx_orientation + 1
         target_count = targets[idx_count].to(device)
         pred_separators = torch.as_tensor(pred_line >= 0.5, dtype=torch.int8).squeeze(-1)
-        pred_count = torch.min(torch.tensor([torch.where(torch.diff(pred_separators) == 1)[0].numel(), torch.where(torch.diff(pred_separators) == -1)[0].numel()]))
+        pred_count = torch.sum(torch.diff(pred_separators) == 1, dim=1)
+
         
         loss_element = LOSS_ELEMENTS_LINELEVEL[idx_count]
         loss_fn = lossFunctions[loss_element]
         loss[idx_count] = loss_fn(pred_count, target_count)
 
         if calculateCorrect:
-            correct[idx_count] = pred_count.item()
-            maxCorrect[idx_count] = target_count.item()
+            correct[idx_count] = torch.sum(pred_count).item()
+            maxCorrect[idx_count] = torch.sum(target_count).item()
     
     if calculateCorrect:
         return loss, correct, maxCorrect

@@ -48,7 +48,7 @@ SeparatorFeatures = namedtuple('feature_separatorLevel', FEATURE_TYPES_SEPARATOR
 # Models
 class TableLineModel(nn.Module):
     def __init__(self, 
-                    image_convolution_parameters={'channels_1': 64, 'size_1': (4, 4), 'pool_count_1': 4},
+                    image_convolution_parameters={'channels_1': 32, 'size_1': (4, 4), 'pool_count_1': 4},
                     preds_convolution_parameters={'channels_1': 6, 'channels_2': 6, 'size_1': (4), 'size_2': (10)},
                     linescanner_parameters={'size': 10, 'channels': 2 , 'keepTopX': 5},
                     lag_lead_structure = [-4, -2, -1, 1, 2, 4],
