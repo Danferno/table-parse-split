@@ -30,17 +30,28 @@ COLOR_OUTLINE = (255, 255, 255, int(0.6*255))
 OPACITY_ORIGINAL = int(0.15*255)
 
 # Helper functions
-def preds_to_separators(predArray, threshold=0.8, setToMidpoint=False, addPaddingSeparators=True, paddingSeparator=None):
+def preds_to_separators(predArray, padding=0, threshold=0.8, setToMidpoint=False, addPaddingSeparators=True, paddingSeparator=None):
     ''' Left: first one (= inclusive), right: first zero (= exclusive)'''
     # Tensor > np.array on cpu
     if isinstance(predArray, torch.Tensor):
         predArray = predArray.cpu().numpy().squeeze()
         
+    predArray = np.concatenate([np.full(shape=(padding), fill_value=0), predArray[padding:-padding], np.full(shape=(padding), fill_value=0)])
     is_separator = (predArray > threshold)
     diff_in_separator_modus = np.diff(is_separator.astype(np.int8))
     separators_start = np.where(diff_in_separator_modus == 1)[0]
     separators_end = np.where(diff_in_separator_modus == -1)[0]
-    separators = np.stack([separators_start, separators_end], axis=1)
+    try:
+        separators = np.stack([separators_start, separators_end], axis=1)
+    except ValueError:
+        if len(separators_start) > len(separators_end):
+            diff_in_separator_modus = np.concatenate([diff_in_separator_modus[:-1], np.array([-1])])
+        else:
+            diff_in_separator_modus = np.concatenate([np.array([1]), diff_in_separator_modus[1:]])
+        separators_start = np.where(diff_in_separator_modus == 1)[0]
+        separators_end = np.where(diff_in_separator_modus == -1)[0]
+        separators = np.stack([separators_start, separators_end], axis=1)
+    separators = np.sort(np.sort(separators, axis=0), axis=1)
 
     # Optionally add padding separators
     if addPaddingSeparators:
@@ -664,7 +675,7 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, pat
 
 
 # Line-level | Predict
-def predict_lineLevel(path_model_file, path_data, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, device='cuda', replace_dirs='warn'):
+def predict_lineLevel(path_model_file, path_data, padding=40, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, device='cuda', replace_dirs='warn'):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
 
@@ -692,8 +703,8 @@ def predict_lineLevel(path_model_file, path_data, ground_truth=False, legacy_fol
                 name_full = image_path.stem
 
                 # Save | Get separators
-                separators_row = preds_to_separators(predArray=preds.row[sampleNumber], setToMidpoint=False, addPaddingSeparators=False)
-                separators_col = preds_to_separators(predArray=preds.col[sampleNumber], setToMidpoint=False, addPaddingSeparators=False)
+                separators_row = preds_to_separators(predArray=preds.row[sampleNumber], setToMidpoint=False, addPaddingSeparators=False, padding=padding)
+                separators_col = preds_to_separators(predArray=preds.col[sampleNumber], setToMidpoint=False, addPaddingSeparators=False, padding=padding)
 
                 pred_dict = {'row_separator_predictions': separators_row.tolist(), 'col_separator_predictions': separators_col.tolist()}
 
@@ -703,7 +714,7 @@ def predict_lineLevel(path_model_file, path_data, ground_truth=False, legacy_fol
         f.write(f'Model path: {path_model_file}')
 
 # Separator-level | Preprocess
-def preprocess_separatorLevel(path_model_line, path_data, path_words=None, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
+def preprocess_separatorLevel(path_model_line, path_data, padding=40, path_words=None, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
     # Parse parameters
     path_data = Path(path_data)
     path_words = path_words or path_data.parent.parent.parent / 'words'
@@ -721,7 +732,7 @@ def preprocess_separatorLevel(path_model_line, path_data, path_words=None, groun
             utils.makeDirs(path_annotated_images, replaceDirs=replace_dirs)
 
     # Predict line-level separator indicators
-    predict_lineLevel(path_model_file=path_model_line, path_data=path_data, ground_truth=ground_truth, replace_dirs=replace_dirs, legacy_folder_names=legacy_folder_names)
+    predict_lineLevel(path_model_file=path_model_line, path_data=path_data, ground_truth=ground_truth, replace_dirs=replace_dirs, legacy_folder_names=legacy_folder_names, padding=padding)
 
     # Loop over tables
     tableNames = [os.path.splitext(filename)[0] for filename in os.listdir(path_predictions_line)]

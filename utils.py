@@ -951,9 +951,8 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     #       replace_dirs=replace_dirs, device=device, epochs=epochs_line)
     # evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
     
-    
     # Preprocess: linelevel > separatorlevel
-    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False)
+    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding)
     fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel'], prefix=prefix, replace_dirs=replace_dirs)
     
     # Train separator level model
