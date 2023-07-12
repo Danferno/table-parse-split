@@ -890,7 +890,7 @@ def generate_training_sample(path_pdfs, path_out,
 
 def train_models(name, info_samples, path_out_data, path_out_model,
                     existing_sample_paths=[],
-                    epochs_line=100, epochs_separator=100,
+                    epochs_line=100, epochs_separator=100, max_lr_line=0.2, max_lr_separator=0.2,
                     replace_dirs='warn', image_format='.png', padding=40, device='cuda',
                     n_workers=-1, verbosity=logging.INFO):
     # Parameters
@@ -946,10 +946,11 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     # trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
     #                        trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
 
-    # # Train line level model
-    # train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
-    #       replace_dirs=replace_dirs, device=device, epochs=epochs_line)
-    # evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
+    # Train line level model
+    train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
+          replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line,
+          disable_weight_visualisation=True)
+    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
     
     # Preprocess: linelevel > separatorlevel
     process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding)
@@ -957,7 +958,8 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     
     # Train separator level model
     train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
-                               replace_dirs=replace_dirs, device=device, epochs=epochs_separator)
+                               replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
+                               disable_weight_visualisation=True)
     evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
 
     # Process out
@@ -998,10 +1000,11 @@ if __name__ == '__main__':
         path_out_model = PATH_TABLEPARSE / 'models'
         name = 'tableparse_round2'
         existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
-        epochs_line = 60
-        epochs_separator = 60
+        epochs_line = 80
+        epochs_separator = 80
+        max_lr=0.1
 
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
-                        epochs_line=epochs_line, epochs_separator=epochs_separator,
+                        epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr,
                         replace_dirs=True, existing_sample_paths=existing_sample_paths,
                         n_workers=n_workers)

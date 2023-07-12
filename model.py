@@ -48,8 +48,8 @@ SeparatorFeatures = namedtuple('feature_separatorLevel', FEATURE_TYPES_SEPARATOR
 # Models
 class TableLineModel(nn.Module):
     def __init__(self, 
-                    image_convolution_parameters={'channels_1': 2, 'size_1': (4, 4), 'pool_count_1': 4},
-                    preds_convolution_parameters={'channels_1': 3, 'channels_2': 3, 'size_1': (4), 'size_2': (10)},
+                    image_convolution_parameters={'channels_1': 64, 'size_1': (4, 4), 'pool_count_1': 4},
+                    preds_convolution_parameters={'channels_1': 6, 'channels_2': 6, 'size_1': (4), 'size_2': (10)},
                     linescanner_parameters={'size': 10, 'channels': 2 , 'keepTopX': 5},
                     lag_lead_structure = [-4, -2, -1, 1, 2, 4],
                     hidden_sizes_features=[48, 16], hidden_sizes_separators=[24, 8],
@@ -235,8 +235,8 @@ class TableLineModel(nn.Module):
 
 class TableSeparatorModel(nn.Module):
     def __init__(self,
-                    linescanner_parameters={'size': 10, 'channels': 3, 'keepTopX_local': 3, 'keepTopX_global': 3},
-                    areascanner_parameters={'size': [8, 8], 'channels': 5, 'keepTopX_local': 3},
+                    linescanner_parameters={'size': 10, 'channels': 32, 'keepTopX_local': 8, 'keepTopX_global': 8},
+                    areascanner_parameters={'size': [8, 8], 'channels': 32, 'keepTopX_local': 8},
                     fc_parameters={'hidden_sizes': [16, 8]},
                     info_variableCount={'common_orientationSpecific': 2*7+1, 'common_global': 3},
                     device='cuda'):
