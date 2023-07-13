@@ -124,18 +124,20 @@ def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculat
             
         loss_element = LOSS_ELEMENTS_LINELEVEL[idx_line]
         loss_fn = lossFunctions[loss_element]
-        loss[idx_line] = loss_fn(pred_line, target_line)
+        loss[idx_line] = loss_fn(preds_unpadded, targets_unpadded)
 
         if calculateCorrect:
-            correct[idx_line] = ((pred_line >= 0.5) == target_line).sum().item()
-            maxCorrect[idx_line] = pred_line.numel()
+            correct[idx_line] = ((preds_unpadded >= 0.5) == targets_unpadded).sum().item()
+            maxCorrect[idx_line] = preds_unpadded.numel()
 
         # Separator count
         idx_count = 2*idx_orientation + 1
         target_count = targets[idx_count].to(device)
-        pred_separators = torch.as_tensor(pred_line >= 0.5, dtype=torch.int8).squeeze(-1)
-        pred_count = torch.sum(torch.diff(pred_separators) == 1, dim=1)
-
+        pred_count = []
+        for idx_sample in range(pred_line.shape[0]):
+            pred_separators = torch.as_tensor(pred_line[idx_sample, :shapes[idx_sample][orientation]] >= 0.5, dtype=torch.int8).squeeze(-1)
+            pred_count.append(torch.sum(torch.diff(pred_separators) == 1))
+        pred_count = torch.stack(pred_count)
         
         loss_element = LOSS_ELEMENTS_LINELEVEL[idx_count]
         loss_fn = lossFunctions[loss_element]

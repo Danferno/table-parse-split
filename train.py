@@ -58,9 +58,9 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         print('Train')
         start = perf_counter()
         size = len(dataloader.dataset)
-        batch_size = dataloader.batch_size
+        batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
         epoch_loss = 0
-        for batchNumber, batch in tqdm(enumerate(dataloader), total=len(dataloader), unit=' batches', smoothing=0.9, position=1, leave=False):     # batch, sample = next(enumerate(dataloader))
+        for batchNumber, batch in tqdm(enumerate(dataloader), total=len(dataloader), unit=' batches', smoothing=0.1, position=1, leave=False):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss
             preds = model(batch.features)
             loss = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.size_image, device=device)
@@ -74,7 +74,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
             # Report intermediate losses
             report_batch_size = (size / batch_size) // report_frequency
             if (batchNumber+1) % report_batch_size == 0:
-                epoch_loss, current = epoch_loss.item(), (batchNumber+1) * batch_size
+                epoch_loss, current = epoch_loss.item(), (batchNumber+1)
                 tqdm.write(f'\tAvg epoch loss: {epoch_loss/current:.3f} [{current:>5d}/{size:>5d}]')
         
         print(f'\n\tEpoch duration: {perf_counter()-start:.0f}s')
@@ -198,7 +198,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
         print('Train')
         start = perf_counter()
         size = len(dataloader.dataset)
-        batch_size = dataloader.batch_size
+        batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
         epoch_loss = 0
         for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss

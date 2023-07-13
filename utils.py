@@ -7,6 +7,7 @@ from collections import namedtuple
 import warnings
 from io import BytesIO
 
+import numba as nb
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
@@ -63,6 +64,19 @@ def makeDirs(path, replaceDirs='warn'):
             raise FileExistsError
 def ensure_startsWithDot(inputString):
     return '.'+inputString if inputString[0] != '.' else inputString
+
+@nb.vectorize([nb.int32(nb.int32, nb.int32)])
+def reset_cumsum(x, y):
+    return x + y if y else 0
+@nb.jit(nopython=True)
+def zero_start(array):
+    for idx, row in enumerate(array):
+        zeros = np.where(row == 0)[0]
+        if len(zeros):
+            array[idx, :zeros[0]] = 0
+        else:
+            array[idx] = 0
+    return array
 
 # Pdf to words
 # Pdf to words | Helpers
@@ -890,7 +904,7 @@ def generate_training_sample(path_pdfs, path_out,
 
 def train_models(name, info_samples, path_out_data, path_out_model,
                     existing_sample_paths=[],
-                    epochs_line=100, epochs_separator=100, max_lr_line=0.2, max_lr_separator=0.2,
+                    epochs_line=100, epochs_separator=100, max_lr_line=0.2, max_lr_separator=0.2, batch_size=4,
                     replace_dirs='warn', image_format='.png', padding=40, device='cuda',
                     n_workers=-1, verbosity=logging.INFO):
     # Parameters
@@ -948,23 +962,23 @@ def train_models(name, info_samples, path_out_data, path_out_model,
 
     # Train line level model
     train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
-          replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line,
+          replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
           disable_weight_visualisation=True)
-    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
+    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
     
-    # Preprocess: linelevel > separatorlevel
-    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding)
+    # # Preprocess: linelevel > separatorlevel
+    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
     fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel'], prefix=prefix, replace_dirs=replace_dirs)
     
-    # Train separator level model
-    train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
-                               replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
-                               disable_weight_visualisation=True)
-    evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
+    # # Train separator level model
+    # train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
+    #                            replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
+    #                            disable_weight_visualisation=True)
+    # evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
 
-    # Process out
-    process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
-                    path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True)
+    # # Process out
+    # process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
+    #                 path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True)
 
 
 
@@ -1000,11 +1014,12 @@ if __name__ == '__main__':
         path_out_model = PATH_TABLEPARSE / 'models'
         name = 'tableparse_round2'
         existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
-        epochs_line = 80
+        epochs_line = 60
         epochs_separator = 80
         max_lr=0.1
+        batch_size=4
 
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
-                        epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr,
+                        epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr, batch_size=batch_size,
                         replace_dirs=True, existing_sample_paths=existing_sample_paths,
                         n_workers=n_workers)

@@ -28,7 +28,7 @@ def __expand_dim(array, correct_dim_length=2):
     return np.expand_dims(array, axis=0) if array.ndim < correct_dim_length else array
 
 # Function
-def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, luminosity_filler=255, device='cuda', replace_dirs='warn', draw_images=True, path_annotations_raw=None):
+def evaluate_lineLevel(path_model_file, path_data, batch_size=3, max_luminosity_features=240, luminosity_filler=255, device='cuda', replace_dirs='warn', draw_images=True, path_annotations_raw=None):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
     
@@ -40,7 +40,7 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=True)
+    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=True, batch_size=batch_size)
     lossFunctions = getLossFunctions(path_model_file=path_model_file)
 
     # Evaluate
@@ -51,29 +51,33 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
             for batch in tqdm(dataloader, desc='Eval | Looping over batches'):
                 # Compute prediction and loss
                 preds = model(batch.features)
-                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, calculateCorrect=True)
+                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.size_image, calculateCorrect=True)
                 eval_loss += eval_loss_batch
                 correct  += correct_batch
                 maxCorrect  += maxCorrect_batch
 
                 # Visualise
                 if draw_images:
-                    batch_size = dataloader.batch_size
+                    batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
                     for sampleNumber in range(batch_size):      # sampleNumber = 0
                         # Sample data
                         # Sample data | Image
-                        pathImage = Path(batch.meta.path_image[sampleNumber])
+                        try:
+                            pathImage = Path(batch.meta.path_image[sampleNumber])
+                        except IndexError:
+                            continue
                         img_annot = cv.imread(str(pathImage), flags=cv.IMREAD_GRAYSCALE)
                         img_initial_size = img_annot.shape
+
                         
                         # Sample data | Ground truth
                         gt = {}
-                        gt['row'] = batch.targets.row_line[sampleNumber].squeeze().cpu().numpy()
-                        gt['col'] = batch.targets.col_line[sampleNumber].squeeze().cpu().numpy()
+                        gt['row'] = batch.targets.row_line[sampleNumber][:img_initial_size[0]].squeeze().cpu().numpy()
+                        gt['col'] = batch.targets.col_line[sampleNumber][:img_initial_size[1]].squeeze().cpu().numpy()
 
                         predictions = {}
-                        predictions['row'] = preds.row[sampleNumber].squeeze().cpu().numpy()
-                        predictions['col'] = preds.col[sampleNumber].squeeze().cpu().numpy()
+                        predictions['row'] = preds.row[sampleNumber][:img_initial_size[0]].squeeze().cpu().numpy()
+                        predictions['col'] = preds.col[sampleNumber][:img_initial_size[1]].squeeze().cpu().numpy()
                         outName = f'{pathImage.stem}.png'
 
                         # Sample data | Features
@@ -95,8 +99,14 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
                         # Draw | Features | Text is startlike
                         indicator_textline_like_rowstart = __convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20, max_luminosity_features=max_luminosity_features)
                         row_annot.append(indicator_textline_like_rowstart)
+                        indicator_textline_capital_ratio = __convert_01_array_to_visual(features['row_between_textlines_capital_ratio'], width=20, max_luminosity_features=max_luminosity_features)
+                        row_annot.append(indicator_textline_capital_ratio)
                         indicator_nearest_right_is_startlike = __convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20, max_luminosity_features=max_luminosity_features)
                         col_annot.append(indicator_nearest_right_is_startlike)
+                        
+                        # Draw | Features | Text distance variation
+                        indicator_ratio_distance_left = __convert_01_array_to_visual(features['col_ratio_p60p40_textdistance_left'], width=20, max_luminosity_features=max_luminosity_features)
+                        col_annot.append(indicator_ratio_distance_left)
 
                         # Draw | Features | Words crossed (lighter = fewer words crossed)
                         wc_row = __convert_01_array_to_visual(features['row_wordsCrossed_relToMax'], invert=True, width=20, max_luminosity_features=max_luminosity_features)
@@ -135,7 +145,7 @@ def evaluate_lineLevel(path_model_file, path_data, max_luminosity_features=240, 
                         img_predictions = Image.alpha_composite(img_predictions_col, img_predictions_row)
                         img_complete = Image.alpha_composite(img_annot_color, img_predictions).convert('RGB')
 
-                        img_complete.save(path_annotations_raw / f'{outName}', format='png')
+                        img_complete.save(path_annotations_raw / f'{outName}')
 
         eval_loss = eval_loss / batchCount
         shareCorrect = correct / maxCorrect
@@ -182,7 +192,7 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
 
                 # Visualise
                 if draw_images:
-                    batch_size = dataloader.batch_size
+                    batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
                     for sampleNumber in range(batch_size):
                         # Sample data
                         # Sample data | Image

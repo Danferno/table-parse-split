@@ -15,6 +15,7 @@ import os
 from lxml import etree
 import logging
 from math import floor, ceil
+import warnings
 
 from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
@@ -153,6 +154,16 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     textDf = textDf_table.sort_values(by=['blockno', 'lineno', 'wordno']).drop(columns=['wordno', 'ocrLabel', 'conf']).reset_index(drop=True)
     textDf['lineno_seq'] = (textDf['blockno']*1000 + textDf['lineno']).rank(method='dense').astype(int)
     textDf['text_like_start_row'] = ((textDf['text'].str[0].str.isupper()) | (textDf['text'].str[0].str.isdigit()) | (textDf['text'].str[:5].str.contains(r'[\.\)\-]', regex=True)) )*1
+
+    # Features | Text | Text like start | Count share of capitals or numerics
+    textDf['count_capital'] = textDf['text'].str.findall(r'[A-Z]').str.len()
+    textDf['count_lowercase'] = textDf['text'].str.findall(r'[a-z\s]').str.len()
+    textDf['ratio_capital'] = textDf['count_capital'] / (textDf['count_lowercase'] + textDf['count_capital'])
+    textDf['ratio_capital'] = textDf['ratio_capital'].fillna(0)
+    textDf.loc[textDf['count_capital'] < 5, 'ratio_capital'] = 0
+    textDf['ratio_capital'] = textDf.groupby(["blockno", "lineno"])['ratio_capital'].transform(max)
+    textDf = textDf.drop(columns=['count_capital', 'count_lowercase'])
+
     
     # Features | Text | Text like rowstart
     # Features | Text | Text like rowstart | Identify rows with text like start
@@ -161,6 +172,7 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     
     # Features | Text | Text like rowstart | Gather info on next line
     textDf_line['F1_text_like_start_row'] = textDf_line['text_like_start_row'].shift(periods=-1).fillna(1).astype(int)
+    textDf_line['F1_ratio_capital'] = textDf_line['ratio_capital'].shift(periods=-1).fillna(0).astype(pd.Float32Dtype())
     textDf_line = textDf_line.sort_values(by=['top', 'bottom', 'lineno', 'lineno_seq']).astype({'lineno_seq': int})
 
     # Features | Text | Text like rowstart | Assign lines to img rows
@@ -170,7 +182,7 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     textDf_row.loc[textDf_row['top'] > textDf_row['bottom'].max(), 'lineno_seq'] = textDf_row['lineno_seq'].max() + 1       # After  last  text: max + 1
     lastLineNo = textDf_row['lineno_seq'].max()
 
-    # Features | Text | Text like rowstart | Identify 'img rows' between text lines
+    # Features | Text | Text like rowstart | Identify 'img rows' between text lines (with img row we mean rows as indexed by the y-axis of the image, rather than by line numbers)
     textDf_row['between_textlines'] = textDf_row['top'] > textDf_row['bottom']
     textDf_row.loc[textDf_row['lineno_seq'] == lastLineNo, 'between_textlines'] = False
     
@@ -212,13 +224,18 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
         if betweenText_max_per_line.min() == False:
             raise Exception('Not all lines contain separators')
 
-    # Features | Text | Text like rowstart | Merge textline-level text_like_start_row info
-    textDf_row = textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row']], left_on='lineno_seq', right_on='lineno_seq', how='outer').fillna({'F1_text_like_start_row': 1}).astype({'F1_text_like_start_row':int}).dropna(axis='index', subset='between_textlines')
+    # Features | Text | Text like rowstart | Merge textline-level text_like_start_row and ratio_capital info
+    textDf_row = (textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row', 'ratio_capital', 'F1_ratio_capital']], left_on='lineno_seq', right_on='lineno_seq', how='outer')
+                    .fillna({'F1_text_like_start_row': 1, 'ratio_capital': 0, 'F1_ratio_capital': 0})
+                    .astype({'F1_text_like_start_row':int, 'ratio_capital':float, 'F1_ratio_capital':float})
+                    .dropna(axis='index', subset='between_textlines'))
     textDf_row['between_textlines_like_rowstart'] = textDf_row['between_textlines'] & textDf_row['F1_text_like_start_row']
+    textDf_row['average_capital_ratio'] = (textDf_row['ratio_capital'] + textDf_row['F1_ratio_capital'])/2 * (textDf_row['between_textlines'])
 
     # Features | Text | Text like rowstart | Add to features
     features['row_between_textlines']               = textDf_row['between_textlines'].to_numpy().astype(np.uint8)
     features['row_between_textlines_like_rowstart'] = textDf_row['between_textlines_like_rowstart'].to_numpy().astype(np.uint8)
+    features['row_between_textlines_capital_ratio'] = textDf_row['average_capital_ratio'].to_numpy().astype(np.float32)
 
     # Features | Text | Text like colstart
     # Features | Text | Text like colstart | Count for each column how often the nearest row to its right contains start-like text
@@ -256,6 +273,8 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     nearest_right_is_text = (counts[128]+counts[255]).astype(np.uint32)
     nearest_right_is_text[nearest_right_is_text == 0] = 1
     nearest_right_is_startlike_share = counts[255]/nearest_right_is_text
+
+    # Features | Text | Text like colstart | Add to features
     features['col_nearest_right_is_startlike_share'] = nearest_right_is_startlike_share    
 
     # Features | Text | Words crossed per row/col
@@ -267,6 +286,35 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
 
     features['row_wordsCrossed_relToMax'] = features['row_wordsCrossed_count'] / features['row_wordsCrossed_count'].max() if features['row_wordsCrossed_count'].max() != 0 else features['row_wordsCrossed_count']
     features['col_wordsCrossed_relToMax'] = features['col_wordsCrossed_count'] / features['col_wordsCrossed_count'].max() if features['col_wordsCrossed_count'].max() != 0 else features['col_wordsCrossed_count']
+
+    # Features | Text | Variance in distance to text
+    # Features | Text | Variance in distance to text | Calculate distances (from left and from right)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        mask = (text_like_start_array < 128).astype(np.int32)      # 0: text, 1: no text
+
+        cumNoText_left = utils.reset_cumsum.accumulate(mask, axis=1)
+        cumNoText_left = utils.zero_start(cumNoText_left).astype(np.float32) / mask.shape[1]
+        cumNoText_left[cumNoText_left == 0] = np.nan
+        
+        cumNoText_right = utils.reset_cumsum.accumulate(np.flip(mask, axis=1), axis=1)
+        cumNoText_right = np.flip(utils.zero_start(cumNoText_right), axis=1).astype(np.float32)  / mask.shape[1]
+        cumNoText_right[cumNoText_right == 0] = np.nan
+
+        # Features | Text | Variance in distance to text | Calculate 60-40 ratio
+        p40 = np.nanpercentile(cumNoText_left, q=40, axis=0)
+        p60 = np.nanpercentile(cumNoText_left, q=60, axis=0)
+        ratio_left = p40 / p60
+        ratio_left[np.isnan(ratio_left)] = 0
+
+        p40 = np.nanpercentile(cumNoText_right, q=40, axis=0)
+        p60 = np.nanpercentile(cumNoText_right, q=60, axis=0)
+        ratio_right = p40 / p60
+        ratio_right[np.isnan(ratio_right)] = 0
+    
+    # Features | Text | Variance in distance to text | Add to features
+    features['col_ratio_p60p40_textdistance_left'] = ratio_left
+    features['col_ratio_p60p40_textdistance_right'] = ratio_right
 
     # Features | Text | Outside text rectangle
     if len(textDf):
@@ -646,9 +694,6 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, pat
         pdfNamesAndPages = {pdfName: list(set([int(entry.split(split_stub_page)[1].split(split_stub_table)[0]) for entry in glob(pathname=f'{pdfName}*', root_dir=path_images, recursive=False, include_hidden=False)])) for pdfName in pdfNames}
 
     # Generate words files and feature files
-    # TD: add code to start easyocr endpoint
-    # preprocess_lineLevel_singlePdf(pdfNameAndPage=('2007-15200320', pdfNamesAndPages['2007-15200320']), 
-    #             path_out=path_out, path_out_features=path_out_features, path_labels=path_labels, ground_truth=ground_truth, path_words=path_words, adjust_targets_to_textboxes=adjust_targets_to_textboxes, padding=padding)
     if n_workers == 1:
         for pdfNameAndPage in tqdm(pdfNamesAndPages.items(), desc='Process line-level | Looping over files', smoothing=0.1):         # pdfNameAndPage = list(pdfNamesAndPages.items())[0]    
             utils.pdf_to_words(pdfNameAndPage=pdfNameAndPage, path_pdfs=path_pdfs, path_data_skew=path_data_skew, path_words=path_words,
@@ -675,7 +720,7 @@ def preprocess_lineLevel(path_images, path_pdfs, path_out, path_labels=None, pat
 
 
 # Line-level | Predict
-def predict_lineLevel(path_model_file, path_data, padding=40, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, device='cuda', replace_dirs='warn'):
+def predict_lineLevel(path_model_file, path_data, padding=40, batch_size=3, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, device='cuda', replace_dirs='warn'):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
 
@@ -687,10 +732,10 @@ def predict_lineLevel(path_model_file, path_data, padding=40, ground_truth=False
     model = TableLineModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names)
+    dataloader = dataloaders.get_dataloader_lineLevel(dir_data=path_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, batch_size=batch_size)
     
     # Loop over batches
-    batch_size = dataloader.batch_size
+    batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Process | Predict line-level | Looping over batches'):
             # Predict
@@ -699,12 +744,16 @@ def predict_lineLevel(path_model_file, path_data, padding=40, ground_truth=False
             # Save
             for sampleNumber in range(batch_size):
                 # Save | Get table name
-                image_path = Path(batch.meta.path_image[sampleNumber])
+                try:
+                    image_path = Path(batch.meta.path_image[sampleNumber])
+                except IndexError:
+                    continue
                 name_full = image_path.stem
+                size_image = batch.meta.size_image[sampleNumber]
 
                 # Save | Get separators
-                separators_row = preds_to_separators(predArray=preds.row[sampleNumber], setToMidpoint=False, addPaddingSeparators=False, padding=padding)
-                separators_col = preds_to_separators(predArray=preds.col[sampleNumber], setToMidpoint=False, addPaddingSeparators=False, padding=padding)
+                separators_row = preds_to_separators(predArray=preds.row[sampleNumber][:size_image['row']], setToMidpoint=False, addPaddingSeparators=False, padding=padding)
+                separators_col = preds_to_separators(predArray=preds.col[sampleNumber][:size_image['col']], setToMidpoint=False, addPaddingSeparators=False, padding=padding)
 
                 pred_dict = {'row_separator_predictions': separators_row.tolist(), 'col_separator_predictions': separators_col.tolist()}
 
@@ -714,7 +763,7 @@ def predict_lineLevel(path_model_file, path_data, padding=40, ground_truth=False
         f.write(f'Model path: {path_model_file}')
 
 # Separator-level | Preprocess
-def preprocess_separatorLevel(path_model_line, path_data, padding=40, path_words=None, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
+def preprocess_separatorLevel(path_model_line, path_data, padding=40, batch_size=3, path_words=None, ground_truth=False, legacy_folder_names=False, path_predictions_line=None, path_features_separator=None, path_targets_separator=None, path_annotated_images=None, draw_images=False, image_format='.png', replace_dirs='warn'):
     # Parse parameters
     path_data = Path(path_data)
     path_words = path_words or path_data.parent.parent.parent / 'words'
@@ -732,7 +781,7 @@ def preprocess_separatorLevel(path_model_line, path_data, padding=40, path_words
             utils.makeDirs(path_annotated_images, replaceDirs=replace_dirs)
 
     # Predict line-level separator indicators
-    predict_lineLevel(path_model_file=path_model_line, path_data=path_data, ground_truth=ground_truth, replace_dirs=replace_dirs, legacy_folder_names=legacy_folder_names, padding=padding)
+    predict_lineLevel(path_model_file=path_model_line, path_data=path_data, ground_truth=ground_truth, replace_dirs=replace_dirs, legacy_folder_names=legacy_folder_names, padding=padding, batch_size=batch_size)
 
     # Loop over tables
     tableNames = [os.path.splitext(filename)[0] for filename in os.listdir(path_predictions_line)]
@@ -930,7 +979,7 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                 continue
 
             # Convert to data
-            batch_size = dataloader.batch_size
+            batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
             for sampleNumber in range(batch_size):
 
                 # Words

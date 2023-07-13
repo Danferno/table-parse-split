@@ -5,16 +5,18 @@ from functools import cache
 from typing import Union
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from torchvision.io import read_image, ImageReadMode
 from torch.nn.functional import pad
 from einops import repeat
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
+from random import shuffle
 
 
 from model import (Meta, Sample, Features, Targets,
                    SeparatorTargets, SeparatorFeatures,
                    COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
+# Batch facilitators
 class CollateFn:
     def __call__(self, batch):
         # Elements to pad
@@ -71,7 +73,44 @@ class CollateFn:
                             targets= Targets(**{key: torch.stack(value) for key, value in newTargets.items() }),
                             meta=Meta(**newMeta))
 
+class BucketBatchSampler(Sampler):
+    # want inputs to be an array
+    def __init__(self, dataset, batch_size, shuffle):
+        self.batch_size = batch_size
+        self.dataset = dataset
+        self.batch_list = self._generate_batch_map()
+        self.num_batches = len(self.batch_list)
+        self.shuffle = shuffle
 
+    def chunkify(self, lst, chunk_size):
+        return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
+
+    def _generate_batch_map(self):
+        # Get image sizes for each sample
+        samples = {idx: sample.meta.size_image for idx, sample in enumerate(self.dataset)}
+
+        # Sort by X and Y coordinates
+        samples_sorted = sorted(samples.items(), key=lambda item: (item[1]['row'], item[1]['col']))
+        sample_indices = list(map(lambda entry: entry[0], samples_sorted))
+
+        # Split into samples of size batch_size
+        batch_list = self.chunkify(sample_indices, self.batch_size)
+        return batch_list
+
+    def batch_count(self):
+        return self.num_batches
+
+    def __len__(self):
+        return self.num_batches
+
+    def __iter__(self):
+        self.batch_list = self._generate_batch_map()
+        if self.shuffle:
+            shuffle(self.batch_list)
+        for i in self.batch_list:
+            yield i
+
+# Datasets
 class LineDataset(Dataset):
     def __init__(self, dir_data, ground_truth, legacy_folder_names=False,
                     device='cuda', image_format='.png'):
@@ -282,8 +321,9 @@ def get_dataloader_lineLevel(dir_data:Union[Path, str], ground_truth=False, lega
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
 
     # Return dataloader
-    return DataLoader(dataset=LineDataset(dir_data=dir_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, device=device, image_format=image_format),
-                      batch_size=batch_size, shuffle=shuffle, collate_fn=CollateFn())
+    dataset = LineDataset(dir_data=dir_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, device=device, image_format=image_format)
+    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle)
+    return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFn())
 
 def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', dir_data_all=None):
     # Parameters
@@ -299,5 +339,5 @@ if __name__ == '__main__':
     PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
     dataloader = get_dataloader_lineLevel(dir_data=PATH_ROOT / 'val', batch_size=3, ground_truth=True)
 
-    batch = next(iter(dataloader))
-    # get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'val')
+    for batch in dataloader:
+        print(batch.meta.size_image)

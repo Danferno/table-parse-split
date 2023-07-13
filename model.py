@@ -16,8 +16,8 @@ FEATURE_TYPES = ORIENTATIONS + ['image', 'row_global', 'col_global']
 COMMON_VARIABLES = ['{}_avg', '{}_absDiff', '{}_spell_mean', '{}_spell_sd', '{}_wordsCrossed_count', '{}_wordsCrossed_relToMax', '{}_in_textrectangle']
 COMMON_GLOBAL_VARIABLES = ['global_{}Avg_p0', 'global_{}Avg_p5', 'global_{}Avg_p10']
 
-ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart']
-COL_VARIABLES = ['col_nearest_right_is_startlike_share']
+ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart', 'row_between_textlines_capital_ratio']
+COL_VARIABLES = ['col_nearest_right_is_startlike_share', 'col_ratio_p60p40_textdistance_left', 'col_ratio_p60p40_textdistance_right']
 
 LOSS_CHARACTERISTICS = ['line', 'separator_count']
 LOSS_ELEMENTS_LINELEVEL = [f'{orientation}_{characteristic}' for orientation in ORIENTATIONS for characteristic in LOSS_CHARACTERISTICS]
@@ -51,9 +51,9 @@ class TableLineModel(nn.Module):
                     image_convolution_parameters={'channels_1': 32, 'size_1': (4, 4), 'pool_count_1': 4},
                     preds_convolution_parameters={'channels_1': 6, 'channels_2': 6, 'size_1': (4), 'size_2': (10)},
                     linescanner_parameters={'size': 10, 'channels': 2 , 'keepTopX': 5},
-                    lag_lead_structure = [-4, -2, -1, 1, 2, 4],
+                    lag_lead_structure = [-4,-3, -2, -1, 1, 2, 3, 4],
                     hidden_sizes_features=[48, 16], hidden_sizes_separators=[24, 8],
-                    info_variableCount={'common_orientationSpecific': 7+1, 'common_global': 3, 'row_specific': 2, 'col_specific': 1},
+                    info_variableCount={'common_orientationSpecific': 7+1, 'common_global': 3, 'row_specific': 3, 'col_specific': 3},
                     truth_threshold=0.8, device='cuda'):
         super().__init__()
         # Parameters
