@@ -16,7 +16,7 @@ FEATURE_TYPES = ORIENTATIONS + ['image', 'row_global', 'col_global']
 COMMON_VARIABLES = ['{}_avg', '{}_absDiff', '{}_spell_mean', '{}_spell_sd', '{}_wordsCrossed_count', '{}_wordsCrossed_relToMax', '{}_in_textrectangle']
 COMMON_GLOBAL_VARIABLES = ['global_{}Avg_p0', 'global_{}Avg_p5', 'global_{}Avg_p10']
 
-ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart', 'row_between_textlines_capital_ratio']
+ROW_VARIABLES = ['row_between_textlines', 'row_between_textlines_like_rowstart', 'row_between_textlines_capital_spell_min_inverted']
 COL_VARIABLES = ['col_nearest_right_is_startlike_share', 'col_ratio_p60p40_textdistance_left', 'col_ratio_p60p40_textdistance_right']
 
 LOSS_CHARACTERISTICS = ['line', 'separator_count']

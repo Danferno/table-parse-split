@@ -77,6 +77,18 @@ def zero_start(array):
         else:
             array[idx] = 0
     return array
+def getLongestConsecutiveCapitalSpell(string):
+    max_length = 0
+    current_length = 0
+
+    for char in string:
+        if char.isupper():
+            current_length += 1
+            max_length = max(max_length, current_length)
+        else:
+            current_length = 0
+
+    return max_length
 
 # Pdf to words
 # Pdf to words | Helpers
@@ -945,20 +957,20 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     #     else:
     #         continue
 
-    # # Preprocess: raw > linelevel
-    # print(f'{prefix}Preprocess line-level')
-    # process.preprocess_lineLevel(ground_truth=True, padding=padding,
-    #                              path_out=path_data_project,
-    #                              path_images=path_data_project / 'table_images',
-    #                              path_pdfs=path_data_project / 'pdfs',
-    #                              path_data_skew=path_data_project / 'skewAngles',
-    #                              path_words=path_out_data / 'words',
-    #                                 replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
+    # Preprocess: raw > linelevel
+    print(f'{prefix}Preprocess line-level')
+    process.preprocess_lineLevel(ground_truth=True, padding=padding,
+                                 path_out=path_data_project,
+                                 path_images=path_data_project / 'tables_images',
+                                 path_pdfs=path_data_project / 'pdfs',
+                                 path_data_skew=path_data_project / 'skewAngles',
+                                 path_words=path_out_data / 'words',
+                                    replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
     
-    # # Split into train/val/test
-    # print(f'{prefix}Split into line-level')
-    # trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
-    #                        trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
+    # Split into train/val/test
+    print(f'{prefix}Split into line-level')
+    trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
+                           trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
 
     # Train line level model
     train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,

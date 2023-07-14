@@ -156,13 +156,8 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     textDf['text_like_start_row'] = ((textDf['text'].str[0].str.isupper()) | (textDf['text'].str[0].str.isdigit()) | (textDf['text'].str[:5].str.contains(r'[\.\)\-]', regex=True)) )*1
 
     # Features | Text | Text like start | Count share of capitals or numerics
-    textDf['count_capital'] = textDf['text'].str.findall(r'[A-Z]').str.len()
-    textDf['count_lowercase'] = textDf['text'].str.findall(r'[a-z\s]').str.len()
-    textDf['ratio_capital'] = textDf['count_capital'] / (textDf['count_lowercase'] + textDf['count_capital'])
-    textDf['ratio_capital'] = textDf['ratio_capital'].fillna(0)
-    textDf.loc[textDf['count_capital'] < 5, 'ratio_capital'] = 0
-    textDf['ratio_capital'] = textDf.groupby(["blockno", "lineno"])['ratio_capital'].transform(max)
-    textDf = textDf.drop(columns=['count_capital', 'count_lowercase'])
+    textDf['longest_capital_spell'] = textDf['text'].apply(utils.getLongestConsecutiveCapitalSpell)
+    textDf['longest_capital_spell'] = textDf.groupby(["blockno", "lineno"])['longest_capital_spell'].transform(max).astype(int)
 
     
     # Features | Text | Text like rowstart
@@ -172,7 +167,7 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
     
     # Features | Text | Text like rowstart | Gather info on next line
     textDf_line['F1_text_like_start_row'] = textDf_line['text_like_start_row'].shift(periods=-1).fillna(1).astype(int)
-    textDf_line['F1_ratio_capital'] = textDf_line['ratio_capital'].shift(periods=-1).fillna(0).astype(pd.Float32Dtype())
+    textDf_line['F1_longest_capital_spell'] = textDf_line['longest_capital_spell'].shift(periods=-1).fillna(0).astype(int)
     textDf_line = textDf_line.sort_values(by=['top', 'bottom', 'lineno', 'lineno_seq']).astype({'lineno_seq': int})
 
     # Features | Text | Text like rowstart | Assign lines to img rows
@@ -225,17 +220,18 @@ def imgAndWords_to_features(img, textDf_table:pd.DataFrame, precision=np.float32
             raise Exception('Not all lines contain separators')
 
     # Features | Text | Text like rowstart | Merge textline-level text_like_start_row and ratio_capital info
-    textDf_row = (textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row', 'ratio_capital', 'F1_ratio_capital']], left_on='lineno_seq', right_on='lineno_seq', how='outer')
-                    .fillna({'F1_text_like_start_row': 1, 'ratio_capital': 0, 'F1_ratio_capital': 0})
-                    .astype({'F1_text_like_start_row':int, 'ratio_capital':float, 'F1_ratio_capital':float})
+    textDf_row = (textDf_row.merge(right=textDf_line[['lineno_seq', 'text_like_start_row', 'F1_text_like_start_row', 'longest_capital_spell', 'F1_longest_capital_spell']], left_on='lineno_seq', right_on='lineno_seq', how='outer')
+                    .fillna({'F1_text_like_start_row': 1,  'longest_capital_spell': 0,   'F1_longest_capital_spell': 0})
+                    .astype({'F1_text_like_start_row':int, 'longest_capital_spell': int, 'F1_longest_capital_spell': int})
                     .dropna(axis='index', subset='between_textlines'))
     textDf_row['between_textlines_like_rowstart'] = textDf_row['between_textlines'] & textDf_row['F1_text_like_start_row']
-    textDf_row['average_capital_ratio'] = (textDf_row['ratio_capital'] + textDf_row['F1_ratio_capital'])/2 * (textDf_row['between_textlines'])
+    textDf_row['min_of_longest_capital_spell'] = textDf_row[['longest_capital_spell', 'F1_longest_capital_spell']].min(axis=1)
+    textDf_row['min_of_longest_capital_spell_inverted'] = (6 - textDf_row['min_of_longest_capital_spell']).clip(lower=0, upper=5) / 6       # clip to 5 so one or zero capital -> 1; more than one moves to 0
 
     # Features | Text | Text like rowstart | Add to features
     features['row_between_textlines']               = textDf_row['between_textlines'].to_numpy().astype(np.uint8)
     features['row_between_textlines_like_rowstart'] = textDf_row['between_textlines_like_rowstart'].to_numpy().astype(np.uint8)
-    features['row_between_textlines_capital_ratio'] = textDf_row['average_capital_ratio'].to_numpy().astype(np.float32)
+    features['row_between_textlines_capital_spell_min_inverted'] = textDf_row['min_of_longest_capital_spell_inverted'].to_numpy().astype(np.float32)
 
     # Features | Text | Text like colstart
     # Features | Text | Text like colstart | Count for each column how often the nearest row to its right contains start-like text
@@ -625,6 +621,10 @@ def preprocess_lineLevel_singlePdf(pdfNameAndPage, path_out, path_out_features, 
 
                 wc_col = utils.convert_01_array_to_visual(features['col_wordsCrossed_relToMax'], invert=True, width=20)
                 col_annot.append(wc_col)
+
+                # Table | Visual | Image with ground truth and text feature | Text Feature | Capital spells
+                indicator_textline_like_rowstart = utils.convert_01_array_to_visual(features['row_between_textlines_capital_spell_min_inverted'], width=20)
+                row_annot.append(indicator_textline_like_rowstart)
 
                 # Table | Visual | Image with ground truth and text feature | Add feature bars
                 row_annot = np.concatenate(row_annot, axis=1)
