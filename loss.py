@@ -51,15 +51,15 @@ def __calculateWeightsFromTargets(targets):
     return classWeights
 
 def __calculateWeights_lineLevel(dataloader):
-    targets_row = [(batch.targets.row_line.sum().item(), batch.targets.row_line.shape[0]) for batch in iter(dataloader.dataset)]
-    targets_col = [(batch.targets.col_line.sum().item(), batch.targets.col_line.shape[0]) for batch in iter(dataloader.dataset)]
+    targets_row = [(sample.targets.row_line.sum().item(), sample.targets.row_line.shape[0]) for sample in iter(dataloader.dataset)]
+    targets_col = [(sample.targets.col_line.sum().item(), sample.targets.col_line.shape[0]) for sample in iter(dataloader.dataset)]
     classWeights = {'row': __calculateWeightsFromTargets(targets=targets_row),
                 'col': __calculateWeightsFromTargets(targets=targets_col)}
     
     return classWeights
 def __calculateWeights_separatorLevel(dataloader):
-    targets_row = [(batch.targets.row.sum().item(), batch.targets.row.shape[0]) for batch in iter(dataloader.dataset)]
-    targets_col = [(batch.targets.col.sum().item(), batch.targets.col.shape[0]) for batch in iter(dataloader.dataset)]
+    targets_row = [(sample.targets.row.sum().item(), sample.targets.row.shape[0]) for sample in iter(dataloader.dataset)]
+    targets_col = [(sample.targets.col.sum().item(), sample.targets.col.shape[0]) for sample in iter(dataloader.dataset)]
     classWeights = {'row': __calculateWeightsFromTargets(targets=targets_row),
                 'col': __calculateWeightsFromTargets(targets=targets_col)}
     
@@ -122,9 +122,9 @@ def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculat
 
             next_start = end
             
-        loss_element = LOSS_ELEMENTS_LINELEVEL[idx_line]
+        loss_element = LOSS_ELEMENTS_LINELEVEL[idx_line]        
         loss_fn = lossFunctions[loss_element]
-        loss[idx_line] = loss_fn(preds_unpadded, targets_unpadded)
+        loss[idx_line] = loss_fn(preds_unpadded, targets_unpadded)  # consider doing this per sample for equal weighting (now overweights large images)
 
         if calculateCorrect:
             correct[idx_line] = ((preds_unpadded >= 0.5) == targets_unpadded).sum().item()
@@ -152,7 +152,7 @@ def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculat
     else:
         return loss.sum()
 
-def calculateLoss_separatorLevel(targets, preds, lossFunctions:dict, calculateCorrect=False, device='cuda'):   
+def calculateLoss_separatorLevel(targets, preds, lossFunctions:dict, shapes, calculateCorrect=False, device='cuda'):   
     loss = torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.float32)
     correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.int64)
 

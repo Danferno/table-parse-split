@@ -169,7 +169,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
 
 def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_add_timestamp=False, shuffle_train_data=True, epochs=3, max_lr=0.08, 
           profile=False, device='cuda', writer=None, path_writer=None, tensorboard_detail_frequency=10, disable_weight_visualisation=False,
-          replace_dirs='warn'):
+          replace_dirs='warn', batch_size=1):
     # Parse parameters
     path_model = Path(path_model)
     path_model = path_model if not path_model_add_timestamp else path_model / datetime.now().strftime("%Y_%m_%d__%H_%M")
@@ -185,8 +185,8 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     model = TableSeparatorModel().to(device)
     model.train()
 
-    dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, ground_truth=True, shuffle=shuffle_train_data, device=device)
-    dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, ground_truth=True, shuffle=False, device=device)
+    dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, ground_truth=True, shuffle=shuffle_train_data, device=device, batch_size=batch_size)
+    dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, ground_truth=True, shuffle=False, device=device, batch_size=batch_size, batch_size=batch_size)
 
     lossFunctions = defineLossFunctions_separatorLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
@@ -200,10 +200,10 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
         size = len(dataloader.dataset)
         batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
         epoch_loss = 0
-        for batchNumber, batch in enumerate(dataloader):     # batch, sample = next(enumerate(dataloader))
+        for batchNumber, batch in tqdm(enumerate(dataloader), total=len(dataloader), unit=' batches', smoothing=0.1, position=1, leave=False):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss
             preds = model(batch.features)
-            loss = calculateLoss_separatorLevel(batch.targets, preds, lossFunctions, device=device)
+            loss = calculateLoss_separatorLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.count_separators, device=device)     # fix loss calculation
             epoch_loss += loss
             
             # Backpropagation

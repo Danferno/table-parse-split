@@ -855,7 +855,7 @@ def fanOutBySplit(path_data, fanout_dirs, source='all', destinations=['train', '
         for fanout_dir in tqdm(fanout_dirs, desc=f'{prefix}Copying new directories from all > {destination}'):
             extension = extensions[fanout_dir]
             makeDirs(path_dest / fanout_dir, replaceDirs=replace_dirs)
-            for filename in tqdm(sample, desc=f'{prefix} Files', position=-1, leave=False):
+            for filename in tqdm(sample, desc=f'{prefix}Files', position=-1, leave=False):
                 try:
                     _ = shutil.copyfile(src=path_source / fanout_dir / f'{filename}{extension}', dst=path_dest / fanout_dir / f'{filename}{extension}')
                 except FileNotFoundError:
@@ -976,16 +976,16 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     # train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
     #       replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
     #       disable_weight_visualisation=True)
-    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
+    # evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
     
-    # # Preprocess: linelevel > separatorlevel
-    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
-    fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel'], prefix=prefix, replace_dirs=replace_dirs)
+    # # # Preprocess: linelevel > separatorlevel
+    # process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
+    # fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel', 'predictions_lineLevel'], prefix=prefix, replace_dirs=replace_dirs)
     
-    # # Train separator level model
-    # train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
-    #                            replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
-    #                            disable_weight_visualisation=True)
+    # Train separator level model
+    train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
+                               replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
+                               disable_weight_visualisation=True, batch_size=batch_size)
     # evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
 
     # # Process out

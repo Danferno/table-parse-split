@@ -17,14 +17,14 @@ from model import (Meta, Sample, Features, Targets,
                    SeparatorTargets, SeparatorFeatures,
                    COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
 # Batch facilitators
-class CollateFn:
+class CollateFnLine:
     def __call__(self, batch):
         # Elements to pad
         elementsToPad = {'targets': ['row_line', 'col_line'], 'features': ['row', 'col', 'row_global', 'col_global']}
 
         # Get largest length
-        rowLengths = [sample.features.row.shape[0] for sample in batch]
-        colLengths = [sample.features.col.shape[0] for sample in batch]
+        rowLengths = [sample.meta.size_image['row'] for sample in batch]
+        colLengths = [sample.meta.size_image['col'] for sample in batch]
         maxRowLength = max(rowLengths)
         maxColLength = max(colLengths)
 
@@ -32,7 +32,7 @@ class CollateFn:
         newTargets = defaultdict(list)
         newFeatures = defaultdict(list)
         newMeta = defaultdict(list)
-        for idx, sample in enumerate(batch):        # idx = 0; sample = newSamples[idx]
+        for idx, sample in enumerate(batch):        # idx = 0; sample = batch[idx]
             padLengths = dict(row = maxRowLength - rowLengths[idx], col = maxColLength - colLengths[idx])
             targets = sample.targets._asdict()
             features = sample.features._asdict()
@@ -72,6 +72,77 @@ class CollateFn:
         return Sample(features=Features(**{key: torch.stack(value) for key, value in newFeatures.items()}),
                             targets= Targets(**{key: torch.stack(value) for key, value in newTargets.items() }),
                             meta=Meta(**newMeta))
+class CollateFnSeparator:
+    def __call__(self, batch):
+        # Elements to pad
+        elementsToPad = {'targets': ['row', 'col'], 'features': ['row', 'col', 'row_global', 'col_global']}
+
+        # Get largest length (image & separators)
+        rowLengths = [sample.meta.size_image['row'] for sample in batch]
+        colLengths = [sample.meta.size_image['col'] for sample in batch]
+        maxRowLength = max(rowLengths)
+        maxColLength = max(colLengths)
+
+        rowSeparatorCount = [sample.features.row.shape[0] for sample in batch]
+        colSeparatorCount = [sample.features.col.shape[0] for sample in batch]
+        maxRowSeparatorCount = max(rowSeparatorCount)
+        maxColSeparatorCount = max(colSeparatorCount)
+
+        # Pad
+        newTargets = defaultdict(list)
+        newFeatures = defaultdict(list)
+        newMeta = defaultdict(list)
+        for idx, sample in enumerate(batch):        # idx = 1; sample = batch[idx]
+            padLengths = dict(row = maxRowLength - rowLengths[idx], col = maxColLength - colLengths[idx])
+            padSeparators = dict(row = maxRowSeparatorCount - rowSeparatorCount[idx], col = maxColSeparatorCount - colSeparatorCount[idx])
+
+            targets = sample.targets._asdict()
+            features = sample.features._asdict()
+            meta = sample.meta._asdict()
+            img = features['image']
+            
+            # Pad | Image
+            newFeatures['image'].append(pad(img, pad=(0, padLengths['col'], 0, padLengths['row']), mode='replicate'))
+            
+            # Pad | Targets                        
+            for element in targets.keys():      # element = next(iter(targets.keys()))
+                padLength = padSeparators['row'] if 'row' in element else padSeparators['col']
+                if element in elementsToPad['targets']:
+                    init = targets[element]
+                    padTensor = repeat(init[-1], pattern='last -> repeat last', repeat=padLength)
+                    newTargets[element].append(torch.concat([init, padTensor]))
+                else:
+                    newTargets[element].append(targets[element])
+
+            # Pad | Features
+            for element in features.keys():      # element = next(iter(features.keys()))
+                padLength = padSeparators['row'] if 'row' in element else padSeparators['col']
+                if element in elementsToPad['features']:
+                    init = features[element]
+                    padTensor = repeat(init[-1], pattern='last -> repeat last', repeat=padLength)
+                    newFeatures[element].append(torch.concat([init, padTensor]))
+                elif element in ['image', 'proposedSeparators_row', 'proposedSeparators_col']:
+                    continue
+                else:
+                    newFeatures[element].append(features[element])
+
+            # Pad | Proposed separators
+            for orientation in ['row', 'col']:      # orientation = 'row'
+                element = f'proposedSeparators_{orientation}'
+                padLength = padSeparators[orientation]
+                init = features[element]
+                lastPixel = maxRowLength if orientation == 'row' else maxColLength
+                padTensor = repeat(torch.tensor([lastPixel-2, lastPixel-1]), pattern='last -> repeat last', repeat=padLength)
+                newFeatures[element].append(torch.concat([init, padTensor]))
+
+            # Pad | Meta
+            for element in meta.keys():
+                newMeta[element].append(meta[element])
+
+        # Stack and return
+        return Sample(features = SeparatorFeatures(**{key: torch.stack(value) for key, value in newFeatures.items()}),
+                      targets  = SeparatorTargets(**{key: torch.stack(value) for key, value in newTargets.items() }),
+                      meta     = Meta(**newMeta))
 
 class BucketBatchSampler(Sampler):
     # want inputs to be an array
@@ -223,14 +294,12 @@ class SeparatorDataset(Dataset):
         self.device = device
         self.dir_images = dir_data / 'tables_images'
         self.dir_meta_lineLevel = dir_data / 'meta_lineLevel'
+        self.dir_features = dir_data / 'features_separatorLevel'
+        self.dir_predictions_line = dir_predictions_line or dir_data / 'predictions_lineLevel'
 
         if ground_truth:
-            self.dir_features = dir_data_all / 'features_separatorLevel'
-            self.dir_targets = dir_data_all / 'targets_separatorLevel'
-            self.dir_predictions_line = dir_predictions_line or dir_data_all / 'predictions_lineLevel'
-        else:
-            self.dir_features = dir_data / 'features_separatorLevel'
-            self.dir_predictions_line = dir_predictions_line or dir_data / 'predictions_lineLevel'
+            self.dir_targets = dir_data / 'targets_separatorLevel'
+
 
         if legacy_folder_names:
             self.dir_images = dir_data / 'images'
@@ -309,7 +378,7 @@ class SeparatorDataset(Dataset):
         # Load sample | Meta
         with open(path_meta_lineLevel, 'r') as f:
             metaData = json.load(f)
-        meta = Meta(path_image=path_image, size_image=image.shape, **metaData)
+        meta = Meta(path_image=path_image, size_image={'row': image.shape[1], 'col': image.shape[2]}, count_separators={'row': features_row.shape[0], 'col': features_col.shape[0]}, **metaData)
 
         # Return sample
         sample = Sample(meta=meta, features=features, targets=targets)
@@ -323,21 +392,23 @@ def get_dataloader_lineLevel(dir_data:Union[Path, str], ground_truth=False, lega
     # Return dataloader
     dataset = LineDataset(dir_data=dir_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, device=device, image_format=image_format)
     batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle)
-    return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFn())
+    return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFnLine())
 
-def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', dir_data_all=None):
+def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png'):
     # Parameters
     dir_data = Path(dir_data)
-    dir_data_all = dir_data_all or dir_data.parent / 'all'
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
 
     # Return dataloader
-    return DataLoader(dataset=SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, dir_data_all=dir_data_all, image_format=image_format, device=device), batch_size=batch_size, shuffle=shuffle)
+    dataset = SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, image_format=image_format, device=device)
+    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle)
+    return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFnSeparator())
 
 
 if __name__ == '__main__':
     PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
-    dataloader = get_dataloader_lineLevel(dir_data=PATH_ROOT / 'val', batch_size=3, ground_truth=True)
+    # dataloader = get_dataloader_lineLevel(dir_data=PATH_ROOT / 'val', batch_size=3, ground_truth=True)
+    dataloader = get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'val', ground_truth=True, batch_size=3)
 
     for batch in dataloader:
         print(batch.meta.size_image)
