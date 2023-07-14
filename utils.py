@@ -957,25 +957,25 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     #     else:
     #         continue
 
-    # Preprocess: raw > linelevel
-    print(f'{prefix}Preprocess line-level')
-    process.preprocess_lineLevel(ground_truth=True, padding=padding,
-                                 path_out=path_data_project,
-                                 path_images=path_data_project / 'tables_images',
-                                 path_pdfs=path_data_project / 'pdfs',
-                                 path_data_skew=path_data_project / 'skewAngles',
-                                 path_words=path_out_data / 'words',
-                                    replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
+    # # Preprocess: raw > linelevel
+    # print(f'{prefix}Preprocess line-level')
+    # process.preprocess_lineLevel(ground_truth=True, padding=padding,
+    #                              path_out=path_data_project,
+    #                              path_images=path_data_project / 'tables_images',
+    #                              path_pdfs=path_data_project / 'pdfs',
+    #                              path_data_skew=path_data_project / 'skewAngles',
+    #                              path_words=path_out_data / 'words',
+    #                                 replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
     
-    # Split into train/val/test
-    print(f'{prefix}Split into line-level')
-    trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
-                           trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
+    # # Split into train/val/test
+    # print(f'{prefix}Split into line-level')
+    # trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
+    #                        trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
 
-    # Train line level model
-    train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
-          replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
-          disable_weight_visualisation=True)
+    # # Train line level model
+    # train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
+    #       replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
+    #       disable_weight_visualisation=True)
     evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
     
     # # Preprocess: linelevel > separatorlevel

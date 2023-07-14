@@ -3,7 +3,7 @@ import os, shutil
 from pathlib import Path
 from time import perf_counter
 from datetime import datetime
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
 import torch
 import utils
@@ -108,7 +108,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
     start_train = perf_counter()
     with torch.autograd.profiler.profile(enabled=profile) as prof:
         best_val_loss = 9e20
-        for epoch in range(epochs):
+        for epoch in trange(epochs, position=2, unit=' epochs', smoothing=0.1):
             learning_rate = scheduler.get_last_lr()[0]
             print(f"\nEpoch {epoch+1} of {epochs}. Learning rate: {learning_rate:03f}")
             model.train()

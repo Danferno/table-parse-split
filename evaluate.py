@@ -99,7 +99,7 @@ def evaluate_lineLevel(path_model_file, path_data, batch_size=3, max_luminosity_
                         # Draw | Features | Text is startlike
                         indicator_textline_like_rowstart = __convert_01_array_to_visual(features['row_between_textlines_like_rowstart'], width=20, max_luminosity_features=max_luminosity_features)
                         row_annot.append(indicator_textline_like_rowstart)
-                        indicator_textline_capital_ratio = __convert_01_array_to_visual(features['row_between_textlines_capital_ratio'], width=20, max_luminosity_features=max_luminosity_features)
+                        indicator_textline_capital_ratio = __convert_01_array_to_visual(features['row_between_textlines_capital_spell_min_inverted'], width=20, max_luminosity_features=max_luminosity_features)
                         row_annot.append(indicator_textline_capital_ratio)
                         indicator_nearest_right_is_startlike = __convert_01_array_to_visual(features['col_nearest_right_is_startlike_share'], width=20, max_luminosity_features=max_luminosity_features)
                         col_annot.append(indicator_nearest_right_is_startlike)
