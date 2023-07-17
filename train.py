@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import matplotlib; matplotlib.use('Agg')
 import numpy as np
 from math import ceil
+from collections import defaultdict
 
 # Helper functions
 def add_weights(model, epoch, writer, disable=False):
@@ -104,6 +105,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         return val_loss
     
     # Train
+    writer.add_graph(model, input_to_model=next(iter(dataloader_train)))
     start_train = perf_counter()
     with torch.autograd.profiler.profile(enabled=profile) as prof:
         best_val_loss = 9e20
@@ -243,6 +245,10 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     
     # Train
     start_train = perf_counter()
+    weightDict = {}
+    print(model)
+    from torchviz import make_dot
+    make_dot(next(iter(dataloader_train)).features, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(Path(path_writer) / 'graph', format='png')
     with torch.autograd.profiler.profile(enabled=profile) as prof:
         best_val_loss = 9e20
         for epoch in trange(epochs, desc='Looping over epochs', position=2, unit=' epochs', smoothing=0.1):
@@ -265,6 +271,16 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
 
             if (epoch % tensorboard_detail_frequency == 0):
                 add_weights(model=model, epoch=epoch, writer=writer, disable=disable_weight_visualisation)
+
+            
+            for param in model.named_parameters():
+                name = param[0]
+                newMean = torch.mean(torch.square(param[1]))
+                if name in weightDict:
+                    tqdm.write(f'{param[0]}: {(newMean - weightDict[name])/weightDict[name]:0.2f}')
+                else:
+                    weightDict[name] = newMean
+                    tqdm.write(f'Grad {param[1].grad_fn} | Weight {name} | {newMean:0.2f}')
 
         print('', flush=True)
         torch.save(model.state_dict(), path_model / f'model_last.pt')

@@ -265,6 +265,8 @@ class TableSeparatorModel(nn.Module):
         self.rearrange_col = Rearrange(pattern='b c h w -> b w (c h)')
         self.rearrange_sep = Rearrange(pattern='b s l o -> b s (l o)')      # batch sep lines options > batch sep lines-options
         self.rearrange_ls = Rearrange(pattern='b c l -> b l c')
+        self.group_sep_incr = Rearrange(pattern='batch sep incr -> batch (sep incr)')
+
 
 
         # Layers | Fully connected
@@ -332,19 +334,20 @@ class TableSeparatorModel(nn.Module):
         # Row | Apply areascanner to neighbourhoud around separator > keep topX of features
         area_scanner_values_row = self.rearrange_row(area_scanner_values)
         area_scanner_topX_byRow = torch.topk(area_scanner_values_row, k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
-        increments = torch.arange(neighbourhood_size, device=self.device) + 1
+        with torch.no_grad():
+            increments = (torch.arange(neighbourhood_size, device=self.device) + 1)
 
-        indices_before = features.proposedSeparators_row[:, :, 0].unsqueeze(-1) - increments
-        indices_after  = features.proposedSeparators_row[:, :, 1].unsqueeze(-1) + increments
-        indices_before = rearrange(indices_before, pattern='batch sep incr -> batch (sep incr)')
-        indices_after  = rearrange(indices_after, pattern='batch sep incr -> batch (sep incr)')
+            indices_before = features.proposedSeparators_row[:, :, 0].unsqueeze(-1) - increments
+            indices_after  = features.proposedSeparators_row[:, :, 1].unsqueeze(-1) + increments
+            indices_before = self.group_sep_incr(indices_before)
+            indices_after  = self.group_sep_incr(indices_after)
 
-        i = torch.arange(batch_size).reshape(batch_size, 1, 1)          # batch x 1 x 1
-        j_before = indices_before.unsqueeze(-1)                         # batch x sep x length x 1
-        j_before = torch.clip(j_before, min=0, max=None)
-        j_after  =  indices_after.unsqueeze(-1)                         # batch x sep x length x 1
-        j_after  = torch.clip(j_after, min=None, max=row_count-1)
-        k = torch.arange(self.areascanner_parameters['keepTopX_local']) # topX_features
+            i = torch.arange(batch_size).reshape(batch_size, 1, 1)          # batch x 1 x 1
+            j_before = indices_before.unsqueeze(-1)                         # batch x sep x length x 1
+            j_before = torch.clip(j_before, min=0, max=None)
+            j_after  =  indices_after.unsqueeze(-1)                         # batch x sep x length x 1
+            j_after  = torch.clip(j_after, min=None, max=row_count-1)
+            k = torch.arange(self.areascanner_parameters['keepTopX_local']) # topX_features
 
         row_areascanner_before_donors = area_scanner_topX_byRow[i, j_before, k]
         row_areascanner_before_donors = rearrange(row_areascanner_before_donors, pattern='batch (sep incr) feats -> batch sep (incr feats)', incr=neighbourhood_size)
@@ -359,21 +362,24 @@ class TableSeparatorModel(nn.Module):
         row_linescanner_topX = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX_local'], dim=-1).values
         row_separator_lengths = torch.diff(features.proposedSeparators_row)+1
         row_longestSeparator = torch.max(row_separator_lengths)
-        increments = torch.arange(row_longestSeparator, device=self.device)
-        indices_separator = torch.clip(features.proposedSeparators_row[:, :, 0].unsqueeze(-1) + increments, min=None, max=row_count-1)
-        indices_separator = rearrange(indices_separator, pattern='batch sep longestseparatorlength -> batch (sep longestseparatorlength)')
-        j_separator = indices_separator.unsqueeze(-1)                   # batch x sep x longest separator x 1
-        k = torch.arange(self.linescanner_parameters['keepTopX_local'])
+        with torch.no_grad():
+            increments = torch.arange(row_longestSeparator, device=self.device)
+            indices_separator = torch.clip(features.proposedSeparators_row[:, :, 0].unsqueeze(-1) + increments, min=None, max=row_count-1)
+            indices_separator = rearrange(indices_separator, pattern='batch sep longestseparatorlength -> batch (sep longestseparatorlength)')
+            j_separator = indices_separator.unsqueeze(-1)                   # batch x sep x longest separator x 1
+            k = torch.arange(self.linescanner_parameters['keepTopX_local'])
 
         row_linescanner_donors = row_linescanner_topX[i, j_separator, k]
         row_linescanner_donors = rearrange(row_linescanner_donors, pattern='batch (sep longestseparatorlength) feats -> batch sep longestseparatorlength feats', longestseparatorlength=row_longestSeparator)
 
         # Row | Keep topX features of linescanner in separator region | Set batch-padding entries to -inf
-        mask = torch.arange(row_linescanner_donors.shape[2], device=self.device).unsqueeze(0) >= row_separator_lengths
+        with torch.no_grad():
+            mask = torch.arange(row_linescanner_donors.shape[2], device=self.device).unsqueeze(0) >= row_separator_lengths
         row_linescanner_donors[mask] = float('-inf')
 
         # Row | Keep topX features of linescanner in separator region | Keep topX
-        row_linescanner_donors = rearrange(row_linescanner_donors, pattern='batch sep sepregion feats -> batch sep (sepregion feats)')
+        with torch.no_grad():
+            row_linescanner_donors = rearrange(row_linescanner_donors, pattern='batch sep sepregion feats -> batch sep (sepregion feats)')
         row_linescanner_topX_local = torch.topk(row_linescanner_donors, k=self.linescanner_parameters['keepTopX_local'], dim=-1, sorted=True).values
 
         # Row | Global linescanner        
@@ -387,7 +393,6 @@ class TableSeparatorModel(nn.Module):
         row_inputs = torch.cat([row_inputs_precalculated, row_scanner_features], dim=2)
         row_preds = self.layer_fc_row(row_inputs)
 
-
         # Col
         # Col | Info
         col_inputs = features.col
@@ -396,19 +401,20 @@ class TableSeparatorModel(nn.Module):
         # Col | Apply areascanner to neighbourhoud around separator > keep topX of features
         area_scanner_values_col = self.rearrange_col(area_scanner_values)
         area_scanner_topX_byCol = torch.topk(area_scanner_values_col, k=self.areascanner_parameters['keepTopX_local'], dim=-1).values
-        increments = torch.arange(neighbourhood_size, device=self.device) + 1
+        with torch.no_grad():
+            increments = torch.arange(neighbourhood_size, device=self.device) + 1
 
-        indices_before = features.proposedSeparators_col[:, :, 0].unsqueeze(-1) - increments
-        indices_after  = features.proposedSeparators_col[:, :, 1].unsqueeze(-1) + increments
-        indices_before = rearrange(indices_before, pattern='batch sep incr -> batch (sep incr)')
-        indices_after  = rearrange(indices_after, pattern='batch sep incr -> batch (sep incr)')
+            indices_before = features.proposedSeparators_col[:, :, 0].unsqueeze(-1) - increments
+            indices_after  = features.proposedSeparators_col[:, :, 1].unsqueeze(-1) + increments
+            indices_before = rearrange(indices_before, pattern='batch sep incr -> batch (sep incr)')
+            indices_after  = rearrange(indices_after, pattern='batch sep incr -> batch (sep incr)')
 
-        i = torch.arange(batch_size).reshape(batch_size, 1, 1)          # batch x 1 x 1
-        j_before = indices_before.unsqueeze(-1)                         # batch x sep x length x 1
-        j_before = torch.clip(j_before, min=0, max=None)
-        j_after  =  indices_after.unsqueeze(-1)                         # batch x sep x length x 1
-        j_after  = torch.clip(j_after, min=None, max=col_count-1)
-        k = torch.arange(self.areascanner_parameters['keepTopX_local']) # topX_features
+            i = torch.arange(batch_size).reshape(batch_size, 1, 1)          # batch x 1 x 1
+            j_before = indices_before.unsqueeze(-1)                         # batch x sep x length x 1
+            j_before = torch.clip(j_before, min=0, max=None)
+            j_after  =  indices_after.unsqueeze(-1)                         # batch x sep x length x 1
+            j_after  = torch.clip(j_after, min=None, max=col_count-1)
+            k = torch.arange(self.areascanner_parameters['keepTopX_local']) # topX_features
 
         col_areascanner_before_donors = area_scanner_topX_byCol[i, j_before, k]
         col_areascanner_before_donors = rearrange(col_areascanner_before_donors, pattern='batch (sep incr) feats -> batch sep (incr feats)', incr=neighbourhood_size)
@@ -423,20 +429,23 @@ class TableSeparatorModel(nn.Module):
         col_linescanner_topX = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX_local'], dim=-1).values
         col_separator_lengths = torch.diff(features.proposedSeparators_col)+1
         col_longestSeparator = torch.max(col_separator_lengths)
-        indices_separator = torch.clip(features.proposedSeparators_col[:, :, 0].unsqueeze(-1) + torch.arange(col_longestSeparator, device=self.device), min=None, max=col_count-1)
-        indices_separator = rearrange(indices_separator, pattern='batch sep longestseparatorlength -> batch (sep longestseparatorlength)')
-        j_separator = indices_separator.unsqueeze(-1)                   # batch x sep x longest separator x 1
-        k = torch.arange(self.linescanner_parameters['keepTopX_local'])
+        with torch.no_grad():
+            indices_separator = torch.clip(features.proposedSeparators_col[:, :, 0].unsqueeze(-1) + torch.arange(col_longestSeparator, device=self.device), min=None, max=col_count-1)
+            indices_separator = rearrange(indices_separator, pattern='batch sep longestseparatorlength -> batch (sep longestseparatorlength)')
+            j_separator = indices_separator.unsqueeze(-1)                   # batch x sep x longest separator x 1
+            k = torch.arange(self.linescanner_parameters['keepTopX_local'])
 
         col_linescanner_donors = col_linescanner_topX[i, j_separator, k]
         col_linescanner_donors = rearrange(col_linescanner_donors, pattern='batch (sep longestseparatorlength) feats -> batch sep longestseparatorlength feats', longestseparatorlength=col_longestSeparator)
 
         # Col | Keep topX features of linescanner in separator region | Set batch-padding entries to -inf
-        mask = torch.arange(col_linescanner_donors.shape[2], device=self.device).unsqueeze(0) >= col_separator_lengths
+        with torch.no_grad():
+            mask = torch.arange(col_linescanner_donors.shape[2], device=self.device).unsqueeze(0) >= col_separator_lengths
         col_linescanner_donors[mask] = float('-inf')
 
         # Col | Keep topX features of linescanner in separator region | Keep topX
-        col_linescanner_donors = rearrange(col_linescanner_donors, pattern='batch sep sepregion feats -> batch sep (sepregion feats)')
+        with torch.no_grad():
+            col_linescanner_donors = rearrange(col_linescanner_donors, pattern='batch sep sepregion feats -> batch sep (sepregion feats)')
         col_linescanner_topX_local = torch.topk(col_linescanner_donors, k=self.linescanner_parameters['keepTopX_local'], dim=-1, sorted=True).values
         
         # Col | Global linescanner
