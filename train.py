@@ -182,16 +182,16 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     utils.makeDirs(path_model, replaceDirs=replace_dirs)
 
     # Initialize elements
-    model = TableSeparatorModel().to(device)
+    model = TableSeparatorModel(device=device).to(device)
     model.train()
 
     dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, ground_truth=True, shuffle=shuffle_train_data, device=device, batch_size=batch_size)
-    dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, ground_truth=True, shuffle=False, device=device, batch_size=batch_size, batch_size=batch_size)
+    dataloader_val = get_dataloader_separatorLevel(dir_data=path_data_val, ground_truth=True, shuffle=False, device=device, batch_size=batch_size)
 
     lossFunctions = defineLossFunctions_separatorLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=len(dataloader_train), epochs=epochs)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=epochs//4, step_size_down=2, mode='triangular', verbose=False)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=ceil(epochs/4), step_size_down=2, mode='triangular', verbose=False)
 
     # Define single epoch training loop
     def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4, device=device):
@@ -308,4 +308,5 @@ if __name__ == '__main__':
     PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
     path_model = Path(r"F:\ml-parsing-project\table-parse-split\models") / 'batchsize_test'
     batch_size = 4
-    train_lineLevel(path_data_train=PATH_ROOT / 'val', path_data_val=PATH_ROOT / 'val', path_model=path_model, replace_dirs='warn', batch_size=batch_size)
+    # train_lineLevel(path_data_train=PATH_ROOT / 'val', path_data_val=PATH_ROOT / 'val', path_model=path_model, replace_dirs='warn', batch_size=batch_size)
+    train_separatorLevel(path_data_train=PATH_ROOT / 'val', path_data_val=PATH_ROOT / 'val', path_model=path_model, replace_dirs=True, batch_size=batch_size)
