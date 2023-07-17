@@ -146,12 +146,14 @@ class CollateFnSeparator:
 
 class BucketBatchSampler(Sampler):
     # want inputs to be an array
-    def __init__(self, dataset, batch_size, shuffle):
+    def __init__(self, dataset, batch_size, shuffle, sort_on_separators=False):
         self.batch_size = batch_size
         self.dataset = dataset
+        self.shuffle = shuffle
+        self.sort_on_separators = sort_on_separators
+
         self.batch_list = self._generate_batch_map()
         self.num_batches = len(self.batch_list)
-        self.shuffle = shuffle
 
     def chunkify(self, lst, chunk_size):
         return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
@@ -159,6 +161,8 @@ class BucketBatchSampler(Sampler):
     def _generate_batch_map(self):
         # Get image sizes for each sample
         samples = {idx: sample.meta.size_image for idx, sample in enumerate(self.dataset)}
+        if self.sort_on_separators:
+            samples = {idx: sample.meta.count_separators for idx, sample in enumerate(self.dataset)}
 
         # Sort by X and Y coordinates
         samples_sorted = sorted(samples.items(), key=lambda item: (item[1]['row'], item[1]['col']))
@@ -401,7 +405,7 @@ def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False,
 
     # Return dataloader
     dataset = SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, image_format=image_format, device=device)
-    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle)
+    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle, sort_on_separators=True)
     return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFnSeparator())
 
 
@@ -411,4 +415,6 @@ if __name__ == '__main__':
     dataloader = get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'val', ground_truth=True, batch_size=3)
 
     for batch in dataloader:
-        print(batch.meta.size_image)
+        print(f'Image: {batch.meta.size_image}')
+        print(f'Separator: {batch.meta.count_separators}')
+        print(f'-----')

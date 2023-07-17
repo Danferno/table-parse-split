@@ -239,9 +239,9 @@ class TableLineModel(nn.Module):
 
 class TableSeparatorModel(nn.Module):
     def __init__(self,
-                    linescanner_parameters={'size': 10, 'channels': 32, 'keepTopX_local': 8, 'keepTopX_global': 8},
-                    areascanner_parameters={'size': [8, 8], 'channels': 32, 'keepTopX_local': 8},
-                    fc_parameters={'hidden_sizes': [16, 8]},
+                    linescanner_parameters={'size': 40, 'channels': 16, 'keepTopX_local': 8, 'keepTopX_global': 8},
+                    areascanner_parameters={'size': [8, 8], 'channels': 16, 'keepTopX_local': 8},
+                    fc_parameters={'hidden_sizes': [24, 8]},
                     info_variableCount={'common_orientationSpecific': 2*7+1, 'common_global': 3},
                     device='cuda'):
         super().__init__()
@@ -357,7 +357,7 @@ class TableSeparatorModel(nn.Module):
         # Row | Keep topX features of linescanner in separator region
         # Row | Keep topX features of linescanner in separator region | Get donors
         row_linescanner_topX = torch.topk(row_linescanner_values, k=self.linescanner_parameters['keepTopX_local'], dim=-1).values
-        row_separator_lengths = torch.diff(features.proposedSeparators_row.squeeze(0))+1
+        row_separator_lengths = torch.diff(features.proposedSeparators_row)+1
         row_longestSeparator = torch.max(row_separator_lengths)
         increments = torch.arange(row_longestSeparator, device=self.device)
         indices_separator = torch.clip(features.proposedSeparators_row[:, :, 0].unsqueeze(-1) + increments, min=None, max=row_count-1)
@@ -421,7 +421,7 @@ class TableSeparatorModel(nn.Module):
         # Col | Keep topX features of linescanner in separator region
         # Col | Keep topX features of linescanner in separator region | Get donors
         col_linescanner_topX = torch.topk(col_linescanner_values, k=self.linescanner_parameters['keepTopX_local'], dim=-1).values
-        col_separator_lengths = torch.diff(features.proposedSeparators_col.squeeze(0))+1
+        col_separator_lengths = torch.diff(features.proposedSeparators_col)+1
         col_longestSeparator = torch.max(col_separator_lengths)
         indices_separator = torch.clip(features.proposedSeparators_col[:, :, 0].unsqueeze(-1) + torch.arange(col_longestSeparator, device=self.device), min=None, max=col_count-1)
         indices_separator = rearrange(indices_separator, pattern='batch sep longestseparatorlength -> batch (sep longestseparatorlength)')

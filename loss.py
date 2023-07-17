@@ -153,22 +153,31 @@ def calculateLoss_lineLevel(targets, preds, lossFunctions:dict, shapes, calculat
         return loss.sum()
 
 def calculateLoss_separatorLevel(targets, preds, lossFunctions:dict, shapes, calculateCorrect=False, device='cuda'):   
-    loss = torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.float32)
+    loss = torch.zeros(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.float32)
     correct, maxCorrect = torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.int64), torch.empty(size=(LOSS_ELEMENTS_SEPARATORLEVEL_COUNT,1), device=device, dtype=torch.int64)
 
-    for idx_orientation, _ in enumerate(ORIENTATIONS):     # awkward formulation to remain consistent with lineLevel function
+    for idx_orientation, orientation in enumerate(ORIENTATIONS):     # awkward formulation to remain consistent with lineLevel function
         # Separator
         idx_separator = idx_orientation
-        target_separator = targets[idx_separator].to(device)
-        pred_separator = preds[idx_orientation].to(device)
-
         loss_element = LOSS_ELEMENTS_SEPARATORLEVEL[idx_separator]
         loss_fn = lossFunctions[loss_element]
-        loss[idx_separator] = loss_fn(pred_separator, target_separator)
+        
+        preds_orientation = []
+        targets_orientation = []
+        correct_orientation = []
+        maxcorrect_orientation = []
+        for sampleNumber, shape in enumerate(shapes):
+            pred_separator = preds[idx_orientation][sampleNumber][:shape[orientation]]
+            target_separator = targets[idx_orientation][sampleNumber][:shape[orientation]]
+            preds_orientation.append(pred_separator)
+            targets_orientation.append(target_separator)
 
-        if calculateCorrect:
-            correct[idx_separator] = ((pred_separator >= 0.5) == target_separator).sum().item()
-            maxCorrect[idx_separator] = pred_separator.numel()
+            correct_orientation.append(((pred_separator >= 0.5) == target_separator).sum().item())
+            maxcorrect_orientation.append(pred_separator.numel())
+
+        loss[idx_separator] = loss_fn(torch.cat(preds_orientation), torch.cat(targets_orientation))
+        correct[idx_separator] = sum(correct_orientation)
+        maxCorrect[idx_separator] = sum(maxcorrect_orientation)
     
     if calculateCorrect:
         return loss, correct, maxCorrect

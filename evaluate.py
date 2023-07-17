@@ -185,7 +185,7 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
             for batch in tqdm(dataloader, desc='Eval | Looping over batches'):
                 # Compute prediction and loss
                 preds = model(batch.features)
-                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_separatorLevel(batch.targets, preds, lossFunctions, calculateCorrect=True)
+                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_separatorLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.separator_counts, calculateCorrect=True)
                 eval_loss += eval_loss_batch
                 correct  += correct_batch
                 maxCorrect  += maxCorrect_batch
