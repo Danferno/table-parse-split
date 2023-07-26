@@ -160,7 +160,7 @@ def evaluate_lineLevel(path_model_file, path_data, batch_size=3, max_luminosity_
 
     eval_loop(dataloader=dataloader, model=model, lossFunctions=lossFunctions, path_annotations_raw=path_annotations_raw, max_luminosity_features=max_luminosity_features, luminosity_filler=luminosity_filler, device=device, draw_images=draw_images)
 
-def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=None, device='cuda', replace_dirs='warn', draw_images=True, draw_text_scale=1):
+def evaluate_separatorLevel(path_model_file, path_data, batch_size=1, path_annotated_images=None, device='cuda', replace_dirs='warn', draw_images=True, draw_text_scale=1):
     # Parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
     path_annotated_images = path_annotated_images or path_model_file.parent / 'annotated'
@@ -173,7 +173,7 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
     model = TableSeparatorModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data, ground_truth=True)
+    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data, ground_truth=True, batch_size=batch_size)
     lossFunctions = getLossFunctions_separatorLevel(path_model_file=path_model_file)
 
     # Evaluate
@@ -185,7 +185,7 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
             for batch in tqdm(dataloader, desc='Eval | Looping over batches'):
                 # Compute prediction and loss
                 preds = model(batch.features)
-                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_separatorLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.separator_counts, calculateCorrect=True)
+                eval_loss_batch, correct_batch, maxCorrect_batch = calculateLoss_separatorLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.count_separators, calculateCorrect=True)
                 eval_loss += eval_loss_batch
                 correct  += correct_batch
                 maxCorrect  += maxCorrect_batch
@@ -196,7 +196,10 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
                     for sampleNumber in range(batch_size):
                         # Sample data
                         # Sample data | Image
-                        path_image = Path(batch.meta.path_image[sampleNumber])
+                        try:
+                            path_image = Path(batch.meta.path_image[sampleNumber])
+                        except IndexError:
+                            continue
 
                         # Sample data | Targets
                         targets = {}
@@ -224,10 +227,14 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
                             for idx, separator in enumerate(locations['row']):
                                 shape = [0, separator[0], img.width, separator[1]]
                                 color_fill = None
-                                if (predictions['row'][idx] == targets['row'][idx]):
-                                    color_fill = utils.COLOR_CORRECT if predictions['row'][idx] else utils.COLOR_MIDDLE
-                                else:
+                                if (predictions['row'][idx] == targets['row'][idx] == True):            # correct retention
+                                    color_fill = utils.COLOR_CORRECT
+                                elif (predictions['row'][idx] == targets['row'][idx] == False):         # correct removal
+                                    color_fill = utils.COLOR_MIDDLE
+                                elif (predictions['row'][idx] == False) & (targets['row'][idx] == True):      # incorrect removal
                                     color_fill = utils.COLOR_WRONG
+                                else:                                                                         # incorrect retention
+                                    color_fill = utils.COLOR_WRONG_ALT
 
                                 img_annot_row.rectangle(xy=shape, fill=color_fill, width=1)
                             
@@ -246,7 +253,7 @@ def evaluate_separatorLevel(path_model_file, path_data, path_annotated_images=No
                                 img_annot_col.rectangle(xy=shape, fill=color_fill, width=1)
 
                             # Legend
-                            img_annot_row.text(xy=(img.width-10, img.height-10), anchor='rd', text='Green: correct retention, orange: correct removal, red: incorrect', fill='black', font=font_text)
+                            img_annot_row.text(xy=(img.width-10, img.height-10), anchor='rd', text='Green: correct retention, green-orange: correct removal, red: incorrect removal, fuchsia: incorrect retention', fill='black', font=font_text)
 
                             # Statistics
                             with warnings.catch_warnings():
