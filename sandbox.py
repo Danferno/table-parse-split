@@ -3,7 +3,7 @@ def run():
     from pathlib import Path
     import torch    # type : ignore
         
-    from model import TableLineModel
+    from models import TableLineModel
     from train import train_lineLevel, train_separatorLevel
     import evaluate
     from describe import describe_model

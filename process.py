@@ -21,7 +21,7 @@ from collections import namedtuple, Counter
 from PIL import Image, ImageFont, ImageDraw
 
 import utils
-from model import TableLineModel, TableSeparatorModel
+from models import TableLineModel, TableSeparatorModel
 import dataloaders
 from joblib import Parallel, delayed
 

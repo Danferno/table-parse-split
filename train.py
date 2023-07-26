@@ -7,7 +7,8 @@ from tqdm import tqdm, trange
 
 import torch
 import utils
-from model import TableLineModel, TableSeparatorModel, LOSS_ELEMENTS_LINELEVEL_COUNT, LOSS_ELEMENTS_SEPARATORLEVEL_COUNT
+from models import TableLineModel, LOSS_ELEMENTS_LINELEVEL_COUNT, LOSS_ELEMENTS_SEPARATORLEVEL_COUNT
+import models
 from loss import defineLossFunctions_lineLevel, defineLossFunctions_separatorLevel, calculateLoss_lineLevel, calculateLoss_separatorLevel
 from dataloaders import get_dataloader_lineLevel, get_dataloader_separatorLevel
 from torch.utils.tensorboard import SummaryWriter
@@ -184,7 +185,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     utils.makeDirs(path_model, replaceDirs=replace_dirs)
 
     # Initialize elements
-    model = TableSeparatorModel(device=device).to(device)
+    model = models.TableSeparatorModel(device=device).to(device)
     model.train()
 
     dataloader_train = get_dataloader_separatorLevel(dir_data=path_data_train, ground_truth=True, shuffle=shuffle_train_data, device=device, batch_size=batch_size)
@@ -248,7 +249,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
     weightDict = {}
     print(model)
     from torchviz import make_dot
-    make_dot(next(iter(dataloader_train)).features, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(Path(path_writer) / 'graph', format='png')
+    make_dot(next(iter(dataloader_train)).features, params=dict(model.named_parameters()), show_attrs=True).render(Path(path_writer) / 'graph', format='png')
     with torch.autograd.profiler.profile(enabled=profile) as prof:
         best_val_loss = 9e20
         for epoch in trange(epochs, desc='Looping over epochs', position=2, unit=' epochs', smoothing=0.1):
@@ -275,7 +276,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
             
             for param in model.named_parameters():
                 name = param[0]
-                newMean = torch.mean(torch.square(param[1]))
+                newMean = torch.sqrt(torch.mean(torch.square(param[1])))
                 if name in weightDict:
                     tqdm.write(f'{param[0]}: {(newMean - weightDict[name])/weightDict[name]:0.2f}')
                 else:

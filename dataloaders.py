@@ -13,7 +13,7 @@ from collections import defaultdict, OrderedDict
 from random import shuffle
 
 
-from model import (Meta, Sample, Features, Targets,
+from models import (Meta, Sample, Features, Targets,
                    SeparatorTargets, SeparatorFeatures,
                    COMMON_VARIABLES, COMMON_VARIABLES_SEPARATORLEVEL, COMMON_GLOBAL_VARIABLES, ROW_VARIABLES, COL_VARIABLES)
 # Batch facilitators

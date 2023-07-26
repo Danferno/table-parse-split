@@ -36,9 +36,10 @@ import train
 import evaluate
 
 # Constants
-COLOR_CORRECT = (0, 255, 0, int(0.25*255))
-COLOR_WRONG = (255, 0, 0, int(0.25*255))
-COLOR_MIDDLE = (128, 128, 0, int(0.25*255))
+COLOR_CORRECT = (0, 255, 0, int(0.25*255))      # green
+COLOR_WRONG = (255, 0, 0, int(0.25*255))        # red
+COLOR_WRONG_ALT = (225, 0, 72, int(0.25*255))   # fuchsia
+COLOR_MIDDLE = (128, 160, 0, int(0.25*255))     # orange
 
 random.seed(498465464)
 
@@ -985,8 +986,8 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     # Train separator level model
     train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
                                replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
-                               disable_weight_visualisation=True, batch_size=batch_size)            # performance seems pretty bad, might need to investigate, not sure if training at all
-    evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs)
+                               disable_weight_visualisation=True, batch_size=batch_size)            # performance seems pretty bad, might need to split into row & col model
+    evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
 
     # # Process out
     # process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
@@ -1027,8 +1028,8 @@ if __name__ == '__main__':
         name = 'tableparse_round2'
         existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
         epochs_line = 60
-        epochs_separator = 10
-        max_lr=0.1
+        epochs_separator = 30
+        max_lr=0.05
         batch_size=5
 
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,

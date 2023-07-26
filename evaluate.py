@@ -11,7 +11,7 @@ import torch        # type : ignore
 
 import utils
 import dataloaders
-from model import (TableLineModel, LOSS_ELEMENTS_LINELEVEL_COUNT,
+from models import (TableLineModel, LOSS_ELEMENTS_LINELEVEL_COUNT,
                    TableSeparatorModel, LOSS_ELEMENTS_SEPARATORLEVEL_COUNT)
 from loss import getLossFunctions, calculateLoss_lineLevel, calculateLoss_separatorLevel, getLossFunctions_separatorLevel
 
