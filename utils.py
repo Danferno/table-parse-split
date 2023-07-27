@@ -1028,9 +1028,9 @@ if __name__ == '__main__':
         name = 'tableparse_round2'
         existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
         epochs_line = 60
-        epochs_separator = 50
-        max_lr=0.1
-        batch_size=4
+        epochs_separator = 30
+        max_lr=0.05
+        batch_size=5
 
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
                         epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr, batch_size=batch_size,
