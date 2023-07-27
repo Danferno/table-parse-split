@@ -53,7 +53,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
 
     lossFunctions = defineLossFunctions_lineLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=40, step_size_down=10, mode='triangular', verbose=False)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=200, step_size_down=100, mode='triangular', verbose=False)
 
     # Define single epoch training loop
     def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4, device=device):

@@ -12,6 +12,14 @@ from einops import repeat
 from collections import defaultdict, OrderedDict
 from random import shuffle
 
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from math import ceil, sqrt
+import warnings
+
 
 from models import (Meta, Sample, Features, Targets,
                    SeparatorTargets, SeparatorFeatures,
@@ -146,11 +154,13 @@ class CollateFnSeparator:
 
 class BucketBatchSampler(Sampler):
     # want inputs to be an array
-    def __init__(self, dataset, batch_size, shuffle, sort_on_separators=False):
+    def __init__(self, dataset, batch_size, shuffle, bin_approach=None, path_out_plot=None, show_naive=False):
         self.batch_size = batch_size
         self.dataset = dataset
         self.shuffle = shuffle
-        self.sort_on_separators = sort_on_separators
+        self.bin_approach = bin_approach
+        self.path_out_plot = path_out_plot 
+        self.show_naive = show_naive
 
         self.batch_list = self._generate_batch_map()
         self.num_batches = len(self.batch_list)
@@ -158,18 +168,117 @@ class BucketBatchSampler(Sampler):
     def chunkify(self, lst, chunk_size):
         return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
 
+    @staticmethod
+    def visualize_bins(df, cols_to_bin, outpath):
+        vizdf = df.copy()
+        vizdf['withinID'] = vizdf.groupby('batch_bucket_id').cumcount()
+        vizdf[f'{cols_to_bin[0]}_jit'] = vizdf[cols_to_bin[0]] + np.random.uniform(low=0, high=0.8, size=len(vizdf))
+        vizdf[f'{cols_to_bin[1]}_jit'] = vizdf[cols_to_bin[1]] + np.random.uniform(low=0, high=0.8, size=len(vizdf))
+
+        rectangles = vizdf.groupby('batch_bucket_id').agg({cols_to_bin[0]: ['min', 'max'], cols_to_bin[1]: ['min', 'max']})
+        rectangles.columns = rectangles.columns.map('_'.join)
+        rectangles['x0'] = rectangles[f'{cols_to_bin[0]}_min'] - 0.1
+        rectangles['y0'] = rectangles[f'{cols_to_bin[1]}_min'] - 0.1
+        rectangles['x1'] = rectangles[f'{cols_to_bin[0]}_max'] + 0.9
+        rectangles['y1'] = rectangles[f'{cols_to_bin[1]}_max'] + 0.9
+        rectangles['width']  = rectangles['x1'] - rectangles['x0']
+        rectangles['height'] = rectangles['y1'] - rectangles['y0']
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sns.scatterplot(x=f'{cols_to_bin[0]}_jit', y=f'{cols_to_bin[1]}_jit', data=vizdf, marker='o', s=15, hue='batch_bucket_id', palette=sns.color_palette('Paired'), legend=False)
+        ax = plt.gca()
+        for _, rectangle in rectangles.iterrows():
+            xy, width, height = (rectangle['x0'], rectangle['y0']), rectangle['width'], rectangle['height']
+            _ = ax.add_patch(Rectangle(xy=xy, width=width, height=height, fill=None, alpha=0.2))
+        plt.ioff()
+        plt.savefig(outpath, dpi=300, bbox_inches='tight', format='png')
+
+    @staticmethod
+    def greedy_binner(df, cols_to_bin, batch_size, path_out_plot=None, show_naive=False):
+        def greedy_binner_innerloop(df_notok, batch_size, cols_to_bin, df_ok=pd.DataFrame()):
+            # Split into buckets
+            desired_bins = ceil(len(df_notok) / batch_size)
+
+            if desired_bins > 2:
+                bin_count = ceil(sqrt(desired_bins))
+                _, x_edges, y_edges = np.histogram2d(x=df_notok[cols_to_bin[0]], y=df_notok[cols_to_bin[1]], bins=[bin_count, bin_count])
+
+                # Assign obs to large buckets
+                df_notok['bucket_1'] = np.digitize(df_notok[cols_to_bin[0]], x_edges) - 1
+                df_notok['bucket_2'] = np.digitize(df_notok[cols_to_bin[1]], y_edges) - 1
+                df_notok['bucket_id'] = df_notok.groupby(['bucket_1', 'bucket_2']).ngroup()
+                df_notok = df_notok.drop(columns=['bucket_1', 'bucket_2'])
+
+                # Split large buckets into batch_sized buckets
+                df_notok['within_bucket_n'] = df_notok.groupby('bucket_id').cumcount()
+                df_notok['batch_bucket_id_within'] = df_notok['within_bucket_n'] // batch_size
+                df_notok['batch_bucket_id'] = df_notok.groupby(['bucket_id', 'batch_bucket_id_within']).ngroup()
+                df_notok['batch_bucket_size'] = df_notok.groupby(['batch_bucket_id'])[df_notok.columns[0]].transform('size')
+
+                # Split OK and too-small buckets
+                df_ok_new = df_notok.loc[(df_notok['batch_bucket_size'] == batch_size), ['batch_bucket_id']]
+                df_notok = df_notok.loc[(~df_notok.index.isin(df_ok_new.index)), [cols_to_bin[0], cols_to_bin[1]]]
+            
+            else:
+                df_notok['batch_bucket_id'] = (df_notok.reset_index().index < 5).astype(np.int8)
+                df_ok_new = df_notok[['batch_bucket_id']]
+                df_notok = df_notok.loc[(~df_notok.index.isin(df_ok_new.index)), [cols_to_bin[0], cols_to_bin[1]]]
+
+            # Merge
+            df_ok = pd.merge(left=df_ok, right=df_ok_new, how='outer', left_index=True, right_index=True)
+            if 'batch_bucket_id_x' in df_ok.columns:
+                df_ok['batch_bucket_id'] = df_ok.groupby(['batch_bucket_id_x', 'batch_bucket_id_y'], dropna=False).ngroup()
+                df_ok = df_ok.drop(columns=['batch_bucket_id_x', 'batch_bucket_id_y'])
+
+            print(f'Attempted to make {desired_bins:>4d} bins. Left with {len(df_notok):>5d} obs to distribute.')
+            return df_ok, df_notok
+
+        if len(cols_to_bin) == 1:
+            raise ValueError('Single column binner not yet implemented')
+        elif len(cols_to_bin) == 2:
+            # Initialize
+            df_notok = df.copy()
+            df_ok = pd.DataFrame()
+            delta_obs = len(df_notok)
+
+            # Bin greedily
+            while len(df_notok) & (delta_obs):
+                obs_to_distribute_initial = len(df_notok)
+                df_ok, df_notok = greedy_binner_innerloop(df_notok=df_notok, df_ok=df_ok, batch_size=batch_size, cols_to_bin=cols_to_bin)
+                delta_obs = obs_to_distribute_initial - len(df_notok)
+
+            df_ok = df_ok.merge(right=df[cols_to_bin], left_index=True, right_index=True)
+        else:
+            raise ValueError('Dims > 2 not yet implemented')
+        
+        if path_out_plot:
+            BucketBatchSampler.visualize_bins(df=df_ok, cols_to_bin=cols_to_bin, outpath=path_out_plot)
+        
+        if (path_out_plot is not None) & (show_naive):
+            df_naive = df.copy()
+            df_naive['batch_bucket_id'] = df_naive.reset_index().index // batch_size
+            BucketBatchSampler.visualize_bins(df=df_naive, cols_to_bin=cols_to_bin, outpath=os.path.splitext(path_out_plot)[0]+'_naive'+os.path.splitext(path_out_plot)[1])
+
+        batch_list = df_ok.groupby('batch_bucket_id').apply(lambda group: group.index.tolist()).tolist()
+
+        return batch_list
+
     def _generate_batch_map(self):
-        # Get image sizes for each sample
-        samples = {idx: sample.meta.size_image for idx, sample in enumerate(self.dataset)}
-        if self.sort_on_separators:
-            samples = {idx: sample.meta.count_separators for idx, sample in enumerate(self.dataset)}
-
-        # Sort by X and Y coordinates
-        samples_sorted = sorted(samples.items(), key=lambda item: (item[1]['row'], item[1]['col']))
-        sample_indices = list(map(lambda entry: entry[0], samples_sorted))
-
-        # Split into samples of size batch_size
-        batch_list = self.chunkify(sample_indices, self.batch_size)
+        # Set parameters for bin approach
+        if self.bin_approach == 'separator':
+            samples = [{'idx': idx, **sample.meta.count_separators} for idx, sample in enumerate(self.dataset)]         # Separator counts
+            df = pd.DataFrame.from_records(samples).set_index('idx', drop=True)
+            cols_to_bin = ['row', 'col']
+        elif self.bin_approach == 'line':
+            samples = [{'idx': idx, **sample.meta.size_image} for idx, sample in enumerate(self.dataset)]               # Image sizes
+            df = pd.DataFrame.from_records(samples).set_index('idx', drop=True)
+            cols_to_bin = ['row', 'col']
+        else:
+            raise ValueError('Not yet implemented')
+        
+        # Apply binner
+        batch_list = BucketBatchSampler.greedy_binner(df=df, cols_to_bin=cols_to_bin, batch_size=self.batch_size, path_out_plot=self.path_out_plot, show_naive=self.show_naive)
         return batch_list
 
     def batch_count(self):
@@ -179,7 +288,6 @@ class BucketBatchSampler(Sampler):
         return self.num_batches
 
     def __iter__(self):
-        self.batch_list = self._generate_batch_map()
         if self.shuffle:
             shuffle(self.batch_list)
         for i in self.batch_list:
@@ -280,7 +388,7 @@ class LineDataset(Dataset):
         # Load sample | Meta
         with open(pathMeta, 'r') as f:
             metaData = json.load(f)
-        meta = Meta(path_image=pathImage, size_image={'row': image.shape[1], 'col': image.shape[2]}, **metaData)
+        meta = Meta(path_image=pathImage, size_image={'row': image.shape[1], 'col': image.shape[2]}, **metaData, count_separators=None)
 
         # Collect in namedtuples
         features = Features(row=features_row, col=features_col, row_global=features_row_global, col_global=features_col_global, image=image)
@@ -388,31 +496,31 @@ class SeparatorDataset(Dataset):
         sample = Sample(meta=meta, features=features, targets=targets)
         return sample
     
-def get_dataloader_lineLevel(dir_data:Union[Path, str], ground_truth=False, legacy_folder_names=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png') -> DataLoader:
+def get_dataloader_lineLevel(dir_data:Union[Path, str], ground_truth=False, legacy_folder_names=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', show_naive=False) -> DataLoader:
     # Parameters
     dir_data = Path(dir_data)
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
 
     # Return dataloader
     dataset = LineDataset(dir_data=dir_data, ground_truth=ground_truth, legacy_folder_names=legacy_folder_names, device=device, image_format=image_format)
-    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle)
+    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle, bin_approach='line', path_out_plot=dir_data / 'bin_plot_lineLevel.png', show_naive=show_naive)
     return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFnLine())
 
-def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png'):
+def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False, batch_size:int=1, shuffle:bool=True, device='cuda', image_format:str='.png', show_naive:bool=False):
     # Parameters
     dir_data = Path(dir_data)
     image_format = f'.{image_format}' if not image_format.startswith('.') else image_format
 
     # Return dataloader
     dataset = SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, image_format=image_format, device=device)
-    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle, sort_on_separators=True)
+    batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle, bin_approach='separator', path_out_plot=dir_data / 'bin_plot_separatorLevel.png', show_naive=show_naive)
     return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFnSeparator())
 
 
 if __name__ == '__main__':
     PATH_ROOT = Path(r'F:\ml-parsing-project\table-parse-split\data\tableparse_round2\splits')
-    # dataloader = get_dataloader_lineLevel(dir_data=PATH_ROOT / 'val', batch_size=3, ground_truth=True)
-    dataloader = get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'val', ground_truth=True, batch_size=3)
+    # dataloader =      get_dataloader_lineLevel(dir_data=PATH_ROOT / 'train', batch_size=5, ground_truth=True, show_naive=True)
+    dataloader = get_dataloader_separatorLevel(dir_data=PATH_ROOT / 'train', ground_truth=True, batch_size=5, show_naive=True)
 
     for batch in dataloader:
         print(f'Image: {batch.meta.size_image}')

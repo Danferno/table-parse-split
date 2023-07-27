@@ -989,9 +989,9 @@ def train_models(name, info_samples, path_out_data, path_out_model,
                                disable_weight_visualisation=True, batch_size=batch_size)            # performance seems pretty bad, might need to split into row & col model
     evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
 
-    # # Process out
-    # process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
-    #                 path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True)
+    # Process out
+    process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
+                    path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True)
 
 
 
@@ -1028,9 +1028,9 @@ if __name__ == '__main__':
         name = 'tableparse_round2'
         existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
         epochs_line = 60
-        epochs_separator = 30
-        max_lr=0.05
-        batch_size=5
+        epochs_separator = 50
+        max_lr=0.1
+        batch_size=4
 
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
                         epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr, batch_size=batch_size,

@@ -239,9 +239,9 @@ class TableLineModel(nn.Module):
 
 class TableSeparatorModel(nn.Module):
     def __init__(self,
-                    linescanner_parameters={'size': 40, 'channels': 16, 'keepTopX_local': 8, 'keepTopX_global': 8},
-                    areascanner_parameters={'size': [8, 8], 'channels': 16, 'keepTopX_local': 8},
-                    fc_parameters={'hidden_sizes': [24, 8]},
+                    linescanner_parameters={'size': 40, 'channels': 24, 'keepTopX_local': 8, 'keepTopX_global': 8},
+                    areascanner_parameters={'size': [8, 8], 'channels': 24, 'keepTopX_local': 8},
+                    fc_parameters={'hidden_sizes': [36, 16]},
                     info_variableCount={'common_orientationSpecific': 2*7+1, 'common_global': 3},
                     device='cuda'):
         super().__init__()
