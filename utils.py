@@ -41,7 +41,7 @@ COLOR_WRONG = (255, 0, 0, int(0.25*255))        # red
 COLOR_WRONG_ALT = (225, 0, 72, int(0.25*255))   # fuchsia
 COLOR_MIDDLE = (128, 160, 0, int(0.25*255))     # orange
 
-random.seed(498465464)
+random.seed(49846544)
 
 # Functions
 def replaceDir(path):
@@ -570,8 +570,13 @@ def pdfToImages(path_input, path_out, image_format='.jpg', sample_size_pdfs=100,
     logger = logging.getLogger(__name__); logger.setLevel(verbosity)
 
     # Draw sample
+    logger.info(f'Pdf list size | Initial: {len(os.listdir(path_input))}')
+
     pdf_donorPool = [pdfEntry.path for pdfEntry in os.scandir(path_input) if pdfEntry.name not in exclude_list]
+    logger.info(f'Pdf list size | After exclude: {len(pdf_donorPool)}')
+
     pdf_sample = random.sample(pdf_donorPool, k=sample_size_pdfs)
+    logger.info(f'Pdf list size | After sampling: {len(pdf_sample)}')
 
     # Split
     def splitPdf(pdfPath, path_output):
@@ -861,13 +866,68 @@ def fanOutBySplit(path_data, fanout_dirs, source='all', destinations=['train', '
                     _ = shutil.copyfile(src=path_source / fanout_dir / f'{filename}{extension}', dst=path_dest / fanout_dir / f'{filename}{extension}')
                 except FileNotFoundError:
                     pass
+def pdf_list_from_exclude_folders(exclude_pdfs_by_folder_list, split_stub_page='-p'):
+    pdf_exclude_list = []
+    if exclude_pdfs_by_folder_list:
+        for folder in exclude_pdfs_by_folder_list:
+            files = os.scandir(folder)
+            pdfs = set([file.name.split(split_stub_page)[0] for file in files])
+            pdf_exclude_list = pdf_exclude_list + list(pdfs)
+    pdf_exclude_list = set(pdf_exclude_list)
+    pdf_exclude_list = [f'{name}.pdf' for name in pdf_exclude_list]
 
+    return pdf_exclude_list
+
+def copy_labels_by_image(path_images, path_labels, path_out, label_format='.txt'):
+    imgEntries = os.scandir(path_images)
+    for entry in tqdm(imgEntries):
+        labelName = os.path.splitext(entry.name)[0] + label_format
+        try:
+            shutil.copyfile(src=path_labels / labelName, dst=path_out / labelName)
+        except FileNotFoundError:
+            pass
+
+def generate_training_sample_detect(path_pdfs, path_out, sample_size_pdfs, path_model_detect, 
+                                    desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], split_stub_page='-p',
+                                    replace_dirs='warn', active_learning=True, deskew=True, image_format='.png',
+                                    n_workers=-2, verbosity=logging.INFO):
+    # Parse paths
+    path_pdfs = Path(path_pdfs); path_out = Path(path_out)
+    exclude_pdfs_by_image_folder_list = [Path(folder) for folder in exclude_pdfs_by_image_folder_list]
+
+    # OPTIONAL: Get list of pdfs to exclude from sampling
+    pdf_exclude_list = pdf_list_from_exclude_folders(exclude_pdfs_by_image_folder_list, split_stub_page)
+
+    # Sample pdfs (and deskew)
+    makeDirs(path_out / 'meta', replaceDirs=replace_dirs)
+    pdfToImages(path_input=path_pdfs, path_out=path_out, image_format='.png', sample_size_pdfs=sample_size_pdfs, replace_dirs=replace_dirs, n_workers=n_workers, deskew=deskew, exclude_list=pdf_exclude_list)
+
+    # Detect tables
+    makeDirs(path_out / 'tables_bboxes', replaceDirs=replace_dirs)
+    tabledetect.detect_table(path_weights=path_model_detect, path_input=path_out / 'pages_images', path_output=path_out / 'temp', image_format=image_format, threshold_confidence=0.2, save_visual_output=False)
+    shutil.copytree(src=path_out / 'temp' / 'out' / 'table-detect' / 'labels', dst=path_out / 'tables_bboxes', dirs_exist_ok=True)
+    shutil.rmtree(path_out / 'temp')
+
+    # Reduce to desired sample
+    makeDirs(path_out / 'selected', replaceDirs=replace_dirs)
+    if active_learning:
+        tabledetect.utils.sampleImages(path_labels=path_out / 'tables_bboxes', path_images=path_out / 'pages_images', path_output=path_out / 'selected', sample_size=desired_sample_size)
+    else:
+        raise ValueError('Non-active learning not yet implemented (TD: take random choice of images and copy to selected folder)')
     
-def generate_training_sample(path_pdfs, path_out, 
+    # Copy labels as well
+    makeDirs(path_out / 'selected_labels', replaceDirs='warn')
+    copy_labels_by_image(path_images=path_out / 'selected', path_labels = path_out / 'tables_bboxes', path_out = path_out / 'selected_labels')
+    
+    # Show pre-annotations
+    makeDirs(path_out / 'tables_annotated', replaceDirs=replace_dirs)
+    tabledetect.utils.visualise_annotation(annotation_type='tabledetect', path_images=path_out / 'selected', path_labels=path_out / 'tables_bboxes', path_output=path_out / 'tables_annotated', n_workers=n_workers)
+
+def generate_training_sample_parse(path_pdfs, path_out, 
                              sample_size_pdfs, path_model_detect, path_model_parse_line, path_model_parse_separator, 
                              respect_existing_sample=False, sample_size_tables=None, desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], replace_dirs='warn',
                              threshold_detect=0.7, padding_tables=40, 
-                             split_stub='-p', active_learning=True, deskew=True, image_format='.png',
+                             split_stub_page='-p', active_learning=True, deskew=True, image_format='.png',
                              n_workers=-1, verbosity=logging.INFO):
     '''
         sample_size_pdfs: number of pdfs to parse for tables
@@ -882,14 +942,14 @@ def generate_training_sample(path_pdfs, path_out,
     if exclude_pdfs_by_image_folder_list:
         for folder in exclude_pdfs_by_image_folder_list:
             files = os.scandir(folder)
-            pdfs = set([file.name.split(split_stub)[0] for file in files])
+            pdfs = set([file.name.split(split_stub_page)[0] for file in files])
             pdf_exclude_list = pdf_exclude_list + list(pdfs)
     pdf_exclude_list = set(pdf_exclude_list)
     pdf_exclude_list = [f'{name}.pdf' for name in pdf_exclude_list]
 
     # Sample pdfs
     makeDirs(path_out / 'meta', replaceDirs=replace_dirs)
-    pdfToImages(path_input=path_pdfs, path_out=path_out, image_format='.png', sample_size_pdfs=sample_size_pdfs, replace_dirs=replace_dirs, n_workers=n_workers, deskew=deskew)
+    pdfToImages(path_input=path_pdfs, path_out=path_out, image_format='.png', sample_size_pdfs=sample_size_pdfs, replace_dirs=replace_dirs, n_workers=n_workers, deskew=deskew, exclude_list=pdf_exclude_list)
 
     # Detect tables
     makeDirs(path_out / 'tables_bboxes', replaceDirs=replace_dirs)
@@ -932,56 +992,56 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     path_model_line = path_out_model / f'{name}_line'
     path_model_separator = path_out_model / f'{name}_separator'
 
-    # # Collect files
-    # makeDirs(path_data_project, replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'labels', replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'tables_images', replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'tables_bboxes', replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'pdfs'  , replaceDirs=replace_dirs)
-    # makeDirs(path_data_project / 'skewAngles'  , replaceDirs=replace_dirs)
+    # Collect files
+    makeDirs(path_data_project, replaceDirs=replace_dirs)
+    makeDirs(path_data_project / 'labels', replaceDirs=replace_dirs)
+    makeDirs(path_data_project / 'tables_images', replaceDirs=replace_dirs)
+    makeDirs(path_data_project / 'tables_bboxes', replaceDirs=replace_dirs)
+    makeDirs(path_data_project / 'pdfs'  , replaceDirs=replace_dirs)
+    makeDirs(path_data_project / 'skewAngles'  , replaceDirs=replace_dirs)
 
-    # for sample in tqdm(info_samples, desc=f'{prefix}Gathering data'):
-    #     sample['path_root'] = Path(sample['path_root'])
-    #     shutil.copytree(src=sample['path_root'] / 'labels_tableparse', dst=path_data_project / 'labels', dirs_exist_ok=True)
-    #     shutil.copytree(src=sample['path_root'] / 'tables_images', dst=path_data_project / 'tables_images', dirs_exist_ok=True)
-    #     shutil.copytree(src=sample['path_root'] / 'tables_bboxes', dst=path_data_project / 'tables_bboxes', dirs_exist_ok=True)
-    #     shutil.copytree(src=sample['path_root'] / 'pdfs', dst=path_data_project / 'pdfs'  , dirs_exist_ok=True)
-    #     shutil.copytree(src=sample['path_root'] / 'meta' / 'skewAngles', dst=path_data_project / 'skewAngles'  , dirs_exist_ok=True)
-    #     shutil.copytree(src=sample['path_root'] / 'words', dst=path_out_data / 'words'  , dirs_exist_ok=True)
+    for sample in tqdm(info_samples, desc=f'{prefix}Gathering data'):
+        sample['path_root'] = Path(sample['path_root'])
+        shutil.copytree(src=sample['path_root'] / 'labels_tableparse', dst=path_data_project / 'labels', dirs_exist_ok=True)
+        shutil.copytree(src=sample['path_root'] / 'tables_images', dst=path_data_project / 'tables_images', dirs_exist_ok=True)
+        shutil.copytree(src=sample['path_root'] / 'tables_bboxes', dst=path_data_project / 'tables_bboxes', dirs_exist_ok=True)
+        shutil.copytree(src=sample['path_root'] / 'pdfs', dst=path_data_project / 'pdfs'  , dirs_exist_ok=True)
+        shutil.copytree(src=sample['path_root'] / 'meta' / 'skewAngles', dst=path_data_project / 'skewAngles'  , dirs_exist_ok=True)
+        shutil.copytree(src=sample['path_root'] / 'words', dst=path_out_data / 'words'  , dirs_exist_ok=True)
     
-    # # Harmonize image_format
-    # imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'tables_images')]
-    # for imgPath in tqdm(imgPaths, desc=f'{prefix}Harmonizing image formats to {image_format}'):
-    #     if os.path.splitext(imgPath)[-1] != image_format:
-    #         _ = cv.imwrite(imgPath.replace(os.path.splitext(imgPath)[-1], image_format), cv.imread(imgPath, cv.IMREAD_GRAYSCALE))
-    #         os.remove(imgPath)
-    #     else:
-    #         continue
+    # Harmonize image_format
+    imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'tables_images')]
+    for imgPath in tqdm(imgPaths, desc=f'{prefix}Harmonizing image formats to {image_format}'):
+        if os.path.splitext(imgPath)[-1] != image_format:
+            _ = cv.imwrite(imgPath.replace(os.path.splitext(imgPath)[-1], image_format), cv.imread(imgPath, cv.IMREAD_GRAYSCALE))
+            os.remove(imgPath)
+        else:
+            continue
 
-    # # Preprocess: raw > linelevel
-    # print(f'{prefix}Preprocess line-level')
-    # process.preprocess_lineLevel(ground_truth=True, padding=padding,
-    #                              path_out=path_data_project,
-    #                              path_images=path_data_project / 'tables_images',
-    #                              path_pdfs=path_data_project / 'pdfs',
-    #                              path_data_skew=path_data_project / 'skewAngles',
-    #                              path_words=path_out_data / 'words',
-    #                                 replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
+    # Preprocess: raw > linelevel
+    print(f'{prefix}Preprocess line-level')
+    process.preprocess_lineLevel(ground_truth=True, padding=padding,
+                                 path_out=path_data_project,
+                                 path_images=path_data_project / 'tables_images',
+                                 path_pdfs=path_data_project / 'pdfs',
+                                 path_data_skew=path_data_project / 'skewAngles',
+                                 path_words=path_out_data / 'words',
+                                    replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
     
-    # # Split into train/val/test
-    # print(f'{prefix}Split into line-level')
-    # trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
-    #                        trainRatio=0.9, valRatio=0.05, maxVal=150, maxTest=150, replace_dirs=replace_dirs)
+    # Split into train/val/test
+    print(f'{prefix}Split into line-level')
+    trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
+                           trainRatio=0.9, valRatio=0.05, maxVal=250, maxTest=150, replace_dirs=replace_dirs)
 
-    # # Train line level model
-    # train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
-    #       replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
-    #       disable_weight_visualisation=True)
-    # evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
+    # Train line level model
+    train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
+          replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
+          disable_weight_visualisation=True)
+    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
     
-    # # # Preprocess: linelevel > separatorlevel
-    # process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
-    # fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel', 'predictions_lineLevel'], prefix=prefix, replace_dirs=replace_dirs)
+    # Preprocess: linelevel > separatorlevel
+    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
+    fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel', 'predictions_lineLevel'], prefix=prefix, replace_dirs=replace_dirs)
     
     # Train separator level model
     train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
@@ -1001,7 +1061,7 @@ if __name__ == '__main__':
     # n_workers = 1
     PATH_TABLEPARSE = Path(r'F:\ml-parsing-project\table-parse-split')
 
-    if TASK == 'generate_sample':
+    if TASK == 'generate_sample_parse':
         path_pdfs = r'F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted\2023-05-16\samples_missing_pdfFiles'
         path_out = r'F:\ml-parsing-project\data\parse_activelearning2_png'
         path_models = Path(r'F:\ml-parsing-project\models')
@@ -1011,13 +1071,13 @@ if __name__ == '__main__':
         desired_sample_size = 4000
         replace_existing_sample = True
 
-        generate_training_sample(path_pdfs=path_pdfs, path_out=path_out, 
+        generate_training_sample_parse(path_pdfs=path_pdfs, path_out=path_out, 
                                 respect_existing_sample=replace_existing_sample, sample_size_pdfs=sample_size_pdfs, desired_sample_size=desired_sample_size,
                                 n_workers=n_workers,
                                 path_model_detect=path_models / 'codamo-tabledetect-best.pt', path_model_parse_line=path_models / 'codamo-tableparse-line-best.pt', path_model_parse_separator=path_models / 'codamo-tableparse-separator-best.pt',
                                 exclude_pdfs_by_image_folder_list=path_previous_samples, active_learning=False, replace_dirs=True)
         
-    if TASK == 'train_models':
+    elif TASK == 'train_models':
         path_sample2 = Path(r"F:\ml-parsing-project\data\parse_activelearning2_png")
         info_samples = [dict(path_root = r"F:\ml-parsing-project\data\parse_activelearning1_harmonized",
                              image_format='.jpg'),
@@ -1028,7 +1088,7 @@ if __name__ == '__main__':
         name = 'tableparse_round2'
         existing_sample_paths = [r'F:\ml-parsing-project\data\parse_activelearning1_harmonized']
         epochs_line = 60
-        epochs_separator = 30
+        epochs_separator = 40
         max_lr=0.05
         batch_size=5
 
@@ -1036,3 +1096,22 @@ if __name__ == '__main__':
                         epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr, batch_size=batch_size,
                         replace_dirs=True, existing_sample_paths=existing_sample_paths,
                         n_workers=n_workers)
+    
+    elif TASK == 'generate_sample_detect':
+        path_pdfs = r'F:\datatog-data-dev\kb-knowledgeBase\bm-benchmark\be-unlisted\2023-05-16\samples_missing_pdfFiles'
+        
+        path_models = Path(r'F:\ml-parsing-project\models')
+        path_model_detect=path_models / 'codamo-tabledetect-best.pt'
+        
+        path_data = Path(r'F:\ml-parsing-project\data')
+        path_out = path_data / 'detect_activelearning1_png'
+        path_previous_samples = [path_data / 'fiverDetect1_14-04-23_williamsmith' / 'images', path_data / 'fiver300_detect' / 'images']
+
+        sample_size_pdfs = 1500
+        desired_sample_size = 8000
+        generate_training_sample_detect(path_pdfs=path_pdfs, path_out=path_out, sample_size_pdfs=sample_size_pdfs, path_model_detect=path_model_detect, 
+                                    desired_sample_size=desired_sample_size, exclude_pdfs_by_image_folder_list=path_previous_samples,
+                                    replace_dirs='warn', active_learning=True, deskew=True, image_format='.png',
+                                    n_workers=-2, verbosity=logging.INFO)
+    else:
+        raise ValueError(f'{TASK} not supported')

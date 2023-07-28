@@ -7,7 +7,19 @@ from tqdm import tqdm
 path_labels = Path(r"F:\ml-parsing-project\data\parse_activelearning2_png\labels_tableparse")
 
 # List of baddies
-baddies = set(["2016-02400322-p11_t0",
+baddies = set([
+    "2019-24200492-p3_t0.png",
+    "2019-26400264-p18_t0.png",
+    "2018-01000018-p8_t0.png",
+    "2021-30300200-p16_t0.png",
+    "2016-02400322-p11_t0.png",
+    "2012-64000120-p5_t0.png",
+    "2011-16800034-p5_t0.png",
+    "2010-11000569-p181_t0.png",
+    "2010-11000569-p247_t0.png",
+    "2010-11000569-p259_t1.png",
+    "2008-09000033-p4_t0.png",
+    "2016-02400322-p11_t0",
     "2012-64000120-p5_t0",
     "2011-16800034-p5_t0",
     "2010-11000569-p181_t0",

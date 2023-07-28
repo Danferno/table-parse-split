@@ -49,7 +49,7 @@ SeparatorFeatures = namedtuple('feature_separatorLevel', FEATURE_TYPES_SEPARATOR
 # Models
 class TableLineModel(nn.Module):
     def __init__(self, 
-                    image_convolution_parameters={'channels_1': 32, 'size_1': (4, 4), 'pool_count_1': 4},
+                    image_convolution_parameters={'channels_1': 24, 'size_1': (4, 4), 'pool_count_1': 4},
                     preds_convolution_parameters={'channels_1': 6, 'channels_2': 6, 'size_1': (4), 'size_2': (10)},
                     linescanner_parameters={'size': 10, 'channels': 2 , 'keepTopX': 5},
                     lag_lead_structure = [-4,-3, -2, -1, 1, 2, 3, 4],
@@ -267,8 +267,6 @@ class TableSeparatorModel(nn.Module):
         self.rearrange_ls = Rearrange(pattern='b c l -> b l c')
         self.group_sep_incr = Rearrange(pattern='batch sep incr -> batch (sep incr)')
 
-
-
         # Layers | Fully connected
         self.layer_fc_row = self.addLinearLayer_depth3(params=fc_parameters)
         self.layer_fc_col = self.addLinearLayer_depth3(params=fc_parameters)
@@ -284,6 +282,23 @@ class TableSeparatorModel(nn.Module):
             (f'relu', nn.ReLU()),
         ]))
         return sequence
+    
+    def addDeepConvNet(self, params, params_areascanner):
+        kernel_initial  = params_areascanner['size']
+        kernel_2        = params['size_2']
+        kernel_3        = params['size_3']
+        channels_initial = params_areascanner['channels']
+        channels_2      = params['channels_2']
+        channels_3      = params['channels_3']
+        max_initial     = params['max1']
+        max_2           = params['max2']
+        max_3           = params['max3']
+        moduleDict = nn.ModuleDict({
+            'conv2': nn.Sequential([nn.Conv2d(in_channels=channels_initial, out_channels=channels_2, kernel_size=kernel_2, stride=kernel_2, padding='valid', dilation=kernel_initial), nn.BatchNorm2d(channels_2)]),
+            'conv3': nn.Sequential([nn.Conv2d(in_channels=channels_2, out_channels=channels_3, kernel_size=kernel_3, stride=kernel_3, padding='valid'), nn.BatchNorm2d(channels_3)]),
+            'relu2': nn.ReLU(),
+            'relu3': nn.ReLU(),
+        })
 
     def addLineScanner(self, orientation, params):
         kernel = (1, params['size']) if orientation == 'row' else (params['size'], 1)

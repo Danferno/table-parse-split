@@ -61,7 +61,7 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         size = len(dataloader.dataset)
         batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
         epoch_loss = 0
-        for batchNumber, batch in tqdm(enumerate(dataloader), desc='Looping over batches', total=len(dataloader), unit=' batches', smoothing=0.1, position=1, leave=False, file=sys.stdout):     # batch, sample = next(enumerate(dataloader))
+        for batchNumber, batch in tqdm(enumerate(dataloader), desc='Looping over batches', total=len(dataloader), unit=' batches', smoothing=0.1, position=1, leave=False):     # batch, sample = next(enumerate(dataloader))
             # Compute prediction and loss
             preds = model(batch.features)
             loss = calculateLoss_lineLevel(batch.targets, preds, lossFunctions, shapes=batch.meta.size_image, device=device)
@@ -105,7 +105,6 @@ def train_lineLevel(path_data_train, path_data_val, path_model, path_model_add_t
         return val_loss
     
     # Train
-    writer.add_graph(model, input_to_model=next(iter(dataloader_train)))
     start_train = perf_counter()
     with torch.autograd.profiler.profile(enabled=profile) as prof:
         best_val_loss = 9e20
@@ -193,7 +192,7 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
 
     lossFunctions = defineLossFunctions_separatorLevel(dataloader=dataloader_train, path_model=path_model)
     optimizer = torch.optim.SGD(model.parameters(), lr=max_lr)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=max_lr/20, max_lr=max_lr, step_size_up=40, step_size_down=10, mode='triangular', verbose=False)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1/10, end_factor=1, total_iters=epochs//5+1)
 
     # Define single epoch training loop
     def train_loop(dataloader, model, lossFunctions, optimizer, report_frequency=4, device=device):
@@ -211,7 +210,6 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            scheduler.step()
 
             # Report intermediate losses
             report_batch_size = (size / batch_size) // report_frequency
@@ -257,9 +255,20 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
             tqdm.write(f"\nEpoch {epoch+1} of {epochs}. Learning rate: {learning_rate:03f}")
             model.train()
             train_loss = train_loop(dataloader=dataloader_train, model=model, lossFunctions=lossFunctions, optimizer=optimizer, report_frequency=4, device=device)
+            
+            for param in model.named_parameters():
+                name = param[0]
+                newMean = torch.sqrt(torch.mean(torch.square(param[1])))
+                if name in weightDict:
+                    tqdm.write(f'{param[0]}: {(newMean - weightDict[name])/weightDict[name]:0.2f}')
+                else:
+                    weightDict[name] = newMean
+                    tqdm.write(f'Grad {param[1].grad_fn} | Weight {name} | {newMean:0.2f}')
+            
             model.eval()
             val_loss = val_loop(dataloader=dataloader_val, model=model, lossFunctions=lossFunctions, device=device)
-
+            
+            scheduler.step()
             writer.add_scalar('Train/Loss', scalar_value=train_loss, global_step=epoch)
             writer.add_scalar('Val/Loss/Total', scalar_value=val_loss.sum(), global_step=epoch)
             writer.add_scalar('Val/Loss/Row Separator', val_loss[0], global_step=epoch)
@@ -272,16 +281,6 @@ def train_separatorLevel(path_data_train, path_data_val, path_model, path_model_
 
             if (epoch % tensorboard_detail_frequency == 0):
                 add_weights(model=model, epoch=epoch, writer=writer, disable=disable_weight_visualisation)
-
-            
-            for param in model.named_parameters():
-                name = param[0]
-                newMean = torch.sqrt(torch.mean(torch.square(param[1])))
-                if name in weightDict:
-                    tqdm.write(f'{param[0]}: {(newMean - weightDict[name])/weightDict[name]:0.2f}')
-                else:
-                    weightDict[name] = newMean
-                    tqdm.write(f'Grad {param[1].grad_fn} | Weight {name} | {newMean:0.2f}')
 
         print('', flush=True)
         torch.save(model.state_dict(), path_model / f'model_last.pt')
