@@ -81,6 +81,12 @@ class CollateFnLine:
                             targets= Targets(**{key: torch.stack(value) for key, value in newTargets.items() }),
                             meta=Meta(**newMeta))
 class CollateFnSeparator:
+    def __init__(self, ground_truth):
+        super().__init__()
+
+        # Parameters
+        self.ground_truth = ground_truth
+
     def __call__(self, batch):
         # Elements to pad
         elementsToPad = {'targets': ['row', 'col'], 'features': ['row', 'col', 'row_global', 'col_global']}
@@ -104,7 +110,8 @@ class CollateFnSeparator:
             padLengths = dict(row = maxRowLength - rowLengths[idx], col = maxColLength - colLengths[idx])
             padSeparators = dict(row = maxRowSeparatorCount - rowSeparatorCount[idx], col = maxColSeparatorCount - colSeparatorCount[idx])
 
-            targets = sample.targets._asdict()
+            if self.ground_truth:
+                targets = sample.targets._asdict()
             features = sample.features._asdict()
             meta = sample.meta._asdict()
             img = features['image']
@@ -112,15 +119,19 @@ class CollateFnSeparator:
             # Pad | Image
             newFeatures['image'].append(pad(img, pad=(0, padLengths['col'], 0, padLengths['row']), mode='replicate'))
             
-            # Pad | Targets                        
-            for element in targets.keys():      # element = next(iter(targets.keys()))
-                padLength = padSeparators['row'] if 'row' in element else padSeparators['col']
-                if element in elementsToPad['targets']:
-                    init = targets[element]
-                    padTensor = repeat(init[-1], pattern='last -> repeat last', repeat=padLength)
-                    newTargets[element].append(torch.concat([init, padTensor]))
-                else:
-                    newTargets[element].append(targets[element])
+            if self.ground_truth:
+                # Pad | Targets                        
+                for element in targets.keys():      # element = next(iter(targets.keys()))
+                    padLength = padSeparators['row'] if 'row' in element else padSeparators['col']
+                    if element in elementsToPad['targets']:
+                        init = targets[element]
+                        padTensor = repeat(init[-1], pattern='last -> repeat last', repeat=padLength)
+                        newTargets[element].append(torch.concat([init, padTensor]))
+                    else:
+                        newTargets[element].append(targets[element])
+            else:
+                for field in SeparatorTargets._fields:
+                    newTargets[field].append(torch.zeros(size=(1,1), device=sample.targets.device))
 
             # Pad | Features
             for element in features.keys():      # element = next(iter(features.keys()))
@@ -420,7 +431,7 @@ class SeparatorDataset(Dataset):
         self.image_format = image_format
 
         # Get items
-        self.items = sorted([os.path.splitext(filename)[0] for filename in os.listdir(self.dir_images)])
+        self.items = sorted([os.path.splitext(filename)[0] for filename in os.listdir(self.dir_predictions_line)])
 
         # Exclude items without row or column separators
         tables_without_separators = []
@@ -514,7 +525,8 @@ def get_dataloader_separatorLevel(dir_data:Union[Path, str], ground_truth=False,
     # Return dataloader
     dataset = SeparatorDataset(dir_data=dir_data, ground_truth=ground_truth, image_format=image_format, device=device)
     batch_sampler = BucketBatchSampler(dataset=dataset, batch_size=batch_size, shuffle=shuffle, bin_approach='separator', path_out_plot=dir_data / 'bin_plot_separatorLevel.png', show_naive=show_naive)
-    return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=CollateFnSeparator())
+    collate_fn = CollateFnSeparator(ground_truth=ground_truth)
+    return DataLoader(dataset=dataset, batch_sampler=batch_sampler, collate_fn=collate_fn)
 
 
 if __name__ == '__main__':

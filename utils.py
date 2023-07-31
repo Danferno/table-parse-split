@@ -10,6 +10,10 @@ from io import BytesIO
 import numba as nb
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
+import matplotlib.pyplot as plt
+
+import torch
+import sklearn.metrics
 
 import cv2 as cv
 from PIL import Image,  ImageDraw, ImageFont
@@ -31,9 +35,8 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 from glob import glob
 
-import process
-import train
-import evaluate
+import models, process, train, evaluate, dataloaders
+
 
 # Constants
 COLOR_CORRECT = (0, 255, 0, int(0.25*255))      # green
@@ -887,6 +890,97 @@ def copy_labels_by_image(path_images, path_labels, path_out, label_format='.txt'
         except FileNotFoundError:
             pass
 
+def estimate_optimal_threshold(model, dataloader, path_model_file, model_type, cost_ratio_fn_over_fp=6, replace_dirs='warn'):
+    ''' For the model at :path_model_file:, determine the optimal threshold based on data at :path_data:, 
+    assuming that a false negative is :cost_ratio_fn_over_fp: times more costly than a false positive.
+    
+    E.g. if false negatives are especially problematic, :cost_ratio_fn_over_fp: could be something like 5. 
+    If false positives are the issue, you'd set it to 0.2 instead. The exact ratio depends on your use-case.
+    
+    The function will transform the precision-recall-curve into a cost curve based on the cost-ratio parameter
+    and detect the threshold that minimises this cost.'''
+    
+    # Parameters
+    path_model_file = Path(path_model_file)
+    path_meta = path_model_file.parent / 'meta'
+    model_name = path_model_file.stem
+
+    makeDirs(path_meta, replaceDirs='overwrite')
+
+    # Prepare model
+    model.load_state_dict(torch.load(path_model_file))
+    model.eval()
+    device = model.device
+    
+    # Obtain preds & targets
+    preds = []
+    targets = []
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Estimating optimal thresold | Applying model to data", leave=False):
+            preds_batch = model(batch.features)
+            if model_type == 'separator':
+                shapes = batch.meta.count_separators
+            else:
+                raise ValueError(f'model_type {model_type} not yet implemented')
+            preds_row = torch.cat([preds_batch.row[sampleNumber, :shape['row']] for sampleNumber, shape in enumerate(shapes)])
+            preds_col = torch.cat([preds_batch.col[sampleNumber, :shape['col']] for sampleNumber, shape in enumerate(shapes)])
+            pred = torch.cat([preds_row, preds_col]).squeeze()
+            preds.append(pred)
+
+            targets_row = torch.cat([batch.targets.row[sampleNumber, :shape['row']] for sampleNumber, shape in enumerate(shapes)])
+            targets_col = torch.cat([batch.targets.col[sampleNumber, :shape['col']] for sampleNumber, shape in enumerate(shapes)])
+            target = torch.cat([targets_row, targets_col]).squeeze()
+            targets.append(target)
+
+    preds = torch.cat([pred for pred in preds]).view(-1, 1)             # Make columns
+    targets = torch.cat([target for target in targets]).view(-1, 1)     # Make columns
+
+    # Obtain FN/FP counts
+    thresholds = torch.linspace(0, 1, 100, device=device)
+    preds_by_threshold = (preds) > thresholds
+
+    # Get false positive and false negative counts
+    # (We do not use PR-curve because precision and recall are affected by true positive counts)
+    FP = torch.sum((preds_by_threshold == 1) & (targets == 0), dim=0).cpu().numpy()
+    FN = torch.sum((preds_by_threshold == 0) & (targets == 1), dim=0).cpu().numpy()
+    thresholds = thresholds.cpu().numpy()
+
+    # Cost curves
+    cost_neutral = np.log(FP + FN + 1)
+    cost_weighted = np.log(FP + FN * cost_ratio_fn_over_fp + 1)
+    cost_neutral = cost_neutral / np.max(cost_neutral)
+    cost_weighted = cost_weighted / np.max(cost_weighted)
+
+    fig, ax1 = plt.subplots()
+    ax1.plot(thresholds, cost_neutral, label='Unweighted cost function', alpha=0.4)
+    ax1.plot(thresholds, cost_weighted, label='Weighted cost function', alpha=1)
+    ax1.set_ylabel('Log Cost\nRelative to max')
+
+    ax2 = ax1.twinx()
+    ax2.plot(thresholds, FP, label='False positives', alpha=0.2, linestyle='dashed')
+    ax2.plot(thresholds, FN, label='False negatives', alpha=0.2, linestyle='dashed')
+    ax2.set_ylabel('Count')
+    
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+
+    ax2.legend(lines + lines2, labels + labels2)
+    plt.xlabel('Threshold'); 
+    plt.grid(True)
+    plt.savefig(path_meta / f'{model_name}_costcurve.png', dpi=300)
+    plt.clf() 
+
+    # Save results
+    optimal_threshold_weighted = float(thresholds[np.argmin(cost_weighted)])
+    optimal_threshold_neutral = float(thresholds[np.argmin(cost_neutral)])
+
+    with open(path_meta / f'{model_name}_optimal_threshold.json', 'w') as f:
+        json.dump(dict(weighted=optimal_threshold_weighted, neutral=optimal_threshold_neutral, cost_ratio_fn_over_fp=cost_ratio_fn_over_fp), f)
+
+    return optimal_threshold_weighted
+
+
+# Collector functions
 def generate_training_sample_detect(path_pdfs, path_out, sample_size_pdfs, path_model_detect, 
                                     desired_sample_size=None, exclude_pdfs_by_image_folder_list=[], split_stub_page='-p',
                                     replace_dirs='warn', active_learning=True, deskew=True, image_format='.png',
@@ -978,7 +1072,7 @@ def generate_training_sample_parse(path_pdfs, path_out,
 def train_models(name, info_samples, path_out_data, path_out_model,
                     existing_sample_paths=[],
                     epochs_line=100, epochs_separator=100, max_lr_line=0.2, max_lr_separator=0.2, batch_size=4,
-                    replace_dirs='warn', image_format='.png', padding=40, device='cuda',
+                    replace_dirs='warn', image_format='.png', padding=40, device='cuda', cost_ratio_fn_over_fp=1,
                     n_workers=-1, verbosity=logging.INFO):
     # Parameters
     if not isinstance(info_samples, list):
@@ -992,66 +1086,71 @@ def train_models(name, info_samples, path_out_data, path_out_model,
     path_model_line = path_out_model / f'{name}_line'
     path_model_separator = path_out_model / f'{name}_separator'
 
-    # Collect files
-    makeDirs(path_data_project, replaceDirs=replace_dirs)
-    makeDirs(path_data_project / 'labels', replaceDirs=replace_dirs)
-    makeDirs(path_data_project / 'tables_images', replaceDirs=replace_dirs)
-    makeDirs(path_data_project / 'tables_bboxes', replaceDirs=replace_dirs)
-    makeDirs(path_data_project / 'pdfs'  , replaceDirs=replace_dirs)
-    makeDirs(path_data_project / 'skewAngles'  , replaceDirs=replace_dirs)
+    # # Collect files
+    # makeDirs(path_data_project, replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'labels', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'tables_images', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'tables_bboxes', replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'pdfs'  , replaceDirs=replace_dirs)
+    # makeDirs(path_data_project / 'skewAngles'  , replaceDirs=replace_dirs)
 
-    for sample in tqdm(info_samples, desc=f'{prefix}Gathering data'):
-        sample['path_root'] = Path(sample['path_root'])
-        shutil.copytree(src=sample['path_root'] / 'labels_tableparse', dst=path_data_project / 'labels', dirs_exist_ok=True)
-        shutil.copytree(src=sample['path_root'] / 'tables_images', dst=path_data_project / 'tables_images', dirs_exist_ok=True)
-        shutil.copytree(src=sample['path_root'] / 'tables_bboxes', dst=path_data_project / 'tables_bboxes', dirs_exist_ok=True)
-        shutil.copytree(src=sample['path_root'] / 'pdfs', dst=path_data_project / 'pdfs'  , dirs_exist_ok=True)
-        shutil.copytree(src=sample['path_root'] / 'meta' / 'skewAngles', dst=path_data_project / 'skewAngles'  , dirs_exist_ok=True)
-        shutil.copytree(src=sample['path_root'] / 'words', dst=path_out_data / 'words'  , dirs_exist_ok=True)
+    # for sample in tqdm(info_samples, desc=f'{prefix}Gathering data'):
+    #     sample['path_root'] = Path(sample['path_root'])
+    #     shutil.copytree(src=sample['path_root'] / 'labels_tableparse', dst=path_data_project / 'labels', dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'tables_images', dst=path_data_project / 'tables_images', dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'tables_bboxes', dst=path_data_project / 'tables_bboxes', dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'pdfs', dst=path_data_project / 'pdfs'  , dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'meta' / 'skewAngles', dst=path_data_project / 'skewAngles'  , dirs_exist_ok=True)
+    #     shutil.copytree(src=sample['path_root'] / 'words', dst=path_out_data / 'words'  , dirs_exist_ok=True)
     
-    # Harmonize image_format
-    imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'tables_images')]
-    for imgPath in tqdm(imgPaths, desc=f'{prefix}Harmonizing image formats to {image_format}'):
-        if os.path.splitext(imgPath)[-1] != image_format:
-            _ = cv.imwrite(imgPath.replace(os.path.splitext(imgPath)[-1], image_format), cv.imread(imgPath, cv.IMREAD_GRAYSCALE))
-            os.remove(imgPath)
-        else:
-            continue
+    # # Harmonize image_format
+    # imgPaths = [entry.path for entry in os.scandir(path_out_data / name / 'tables_images')]
+    # for imgPath in tqdm(imgPaths, desc=f'{prefix}Harmonizing image formats to {image_format}'):
+    #     if os.path.splitext(imgPath)[-1] != image_format:
+    #         _ = cv.imwrite(imgPath.replace(os.path.splitext(imgPath)[-1], image_format), cv.imread(imgPath, cv.IMREAD_GRAYSCALE))
+    #         os.remove(imgPath)
+    #     else:
+    #         continue
 
-    # Preprocess: raw > linelevel
-    print(f'{prefix}Preprocess line-level')
-    process.preprocess_lineLevel(ground_truth=True, padding=padding,
-                                 path_out=path_data_project,
-                                 path_images=path_data_project / 'tables_images',
-                                 path_pdfs=path_data_project / 'pdfs',
-                                 path_data_skew=path_data_project / 'skewAngles',
-                                 path_words=path_out_data / 'words',
-                                    replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
+    # # Preprocess: raw > linelevel
+    # print(f'{prefix}Preprocess line-level')
+    # process.preprocess_lineLevel(ground_truth=True, padding=padding,
+    #                              path_out=path_data_project,
+    #                              path_images=path_data_project / 'tables_images',
+    #                              path_pdfs=path_data_project / 'pdfs',
+    #                              path_data_skew=path_data_project / 'skewAngles',
+    #                              path_words=path_out_data / 'words',
+    #                                 replace_dirs=replace_dirs, verbosity=verbosity, n_workers=n_workers)
     
-    # Split into train/val/test
-    print(f'{prefix}Split into line-level')
-    trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
-                           trainRatio=0.9, valRatio=0.05, maxVal=250, maxTest=150, replace_dirs=replace_dirs)
+    # # Split into train/val/test
+    # print(f'{prefix}Split into line-level')
+    # trainValTestSplit(path_data=path_data_project, existing_sample_paths=existing_sample_paths,
+    #                        trainRatio=0.9, valRatio=0.05, maxVal=250, maxTest=150, replace_dirs=replace_dirs)
 
-    # Train line level model
-    train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
-          replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
-          disable_weight_visualisation=True)
-    evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
+    # # Train line level model
+    # train.train_lineLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_line,
+    #       replace_dirs=replace_dirs, device=device, epochs=epochs_line, max_lr=max_lr_line, batch_size=batch_size,
+    #       disable_weight_visualisation=True)
+    # evaluate.evaluate_lineLevel(path_model_file=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
     
-    # Preprocess: linelevel > separatorlevel
-    process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
-    fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel', 'predictions_lineLevel'], prefix=prefix, replace_dirs=replace_dirs)
+    # # Preprocess: linelevel > separatorlevel
+    # process.preprocess_separatorLevel(path_model_line=path_model_line / 'model_best.pt', path_data=path_data_project / 'splits' / 'all', path_words=path_out_data / 'words', replace_dirs=replace_dirs, ground_truth=True, draw_images=False, padding=padding, batch_size=batch_size)
+    # fanOutBySplit(path_data=path_data_project / 'splits', fanout_dirs=['features_separatorLevel', 'targets_separatorLevel', 'predictions_lineLevel'], prefix=prefix, replace_dirs=replace_dirs)
     
     # Train separator level model
-    train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
-                               replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
-                               disable_weight_visualisation=True, batch_size=batch_size)            # performance seems pretty bad, might need to split into row & col model
-    evaluate.evaluate_separatorLevel(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
+    # train.train_separatorLevel(path_data_train=path_data_project / 'splits' / 'train', path_data_val=path_data_project / 'splits' / 'val', path_model=path_model_separator,
+    #                            replace_dirs=replace_dirs, device=device, epochs=epochs_separator, max_lr=max_lr_separator,
+    #                            disable_weight_visualisation=True, batch_size=batch_size)
+    
+    model = models.TableSeparatorModel().to(device=device)
+    dataloader_val = dataloaders.get_dataloader_separatorLevel(dir_data=path_data_project / 'splits' / 'val', batch_size=batch_size, ground_truth=True, shuffle=False, device=device)
+    optimal_threshold = estimate_optimal_threshold(cost_ratio_fn_over_fp=cost_ratio_fn_over_fp, model_type='separator', path_model_file=path_model_separator / 'model_best.pt', model=model, dataloader=dataloader_val)
+
+    evaluate.evaluate_separatorLevel(truth_threshold=optimal_threshold, path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs, batch_size=batch_size)
 
     # Process out
-    process.predict_and_process(path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
-                    path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True)
+    process.predict_and_process(truth_threshold=optimal_threshold, path_model_file=path_model_separator / 'model_best.pt', path_data=path_data_project / 'splits' / 'val', device=device, replace_dirs=replace_dirs,
+                    path_pdfs=path_data_project / 'pdfs', path_words=path_out_data / 'words', padding=padding, out_data=True, out_images=True, out_labels_rows=False, ground_truth=True, batch_size=batch_size)
 
 
 
@@ -1092,8 +1191,10 @@ if __name__ == '__main__':
         max_lr=0.05
         batch_size=5
 
+        cost_ratio_fn_over_fp = 4
+
         train_models(name=name, info_samples=info_samples, path_out_data=path_out_data, path_out_model=path_out_model,
-                        epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, max_lr_separator=max_lr, batch_size=batch_size,
+                        epochs_line=epochs_line, epochs_separator=epochs_separator, max_lr_line=max_lr, cost_ratio_fn_over_fp=cost_ratio_fn_over_fp, max_lr_separator=max_lr, batch_size=batch_size,
                         replace_dirs=True, existing_sample_paths=existing_sample_paths,
                         n_workers=n_workers)
     
@@ -1113,5 +1214,17 @@ if __name__ == '__main__':
                                     desired_sample_size=desired_sample_size, exclude_pdfs_by_image_folder_list=path_previous_samples,
                                     replace_dirs='warn', active_learning=True, deskew=True, image_format='.png',
                                     n_workers=-2, verbosity=logging.INFO)
+    elif TASK == 'estimate_optimal_threshold_separator':
+        path_models = Path(r'F:\ml-parsing-project\models')
+        path_model_parse = path_models / 'codamo-tableparse-separator-best.pt'
+        name = 'tableparse_round2'
+        FN_over_FP_ratio = 5
+        model = models.TableSeparatorModel().to(device='cuda')
+        model_type = 'separator'
+
+        batch_size = 4
+        dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=PATH_TABLEPARSE / 'data' / name / 'splits' / 'val', shuffle=False, device='cuda', batch_size=batch_size, ground_truth=True)
+
+        estimate_optimal_threshold(cost_ratio_fn_over_fp=FN_over_FP_ratio, model_type='separator', path_model_file=path_model_parse, model=model, dataloader=dataloader)
     else:
         raise ValueError(f'{TASK} not supported')

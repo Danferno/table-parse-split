@@ -160,7 +160,7 @@ def evaluate_lineLevel(path_model_file, path_data, batch_size=3, max_luminosity_
 
     eval_loop(dataloader=dataloader, model=model, lossFunctions=lossFunctions, path_annotations_raw=path_annotations_raw, max_luminosity_features=max_luminosity_features, luminosity_filler=luminosity_filler, device=device, draw_images=draw_images)
 
-def evaluate_separatorLevel(path_model_file, path_data, batch_size=1, path_annotated_images=None, device='cuda', replace_dirs='warn', draw_images=True, draw_text_scale=1):
+def evaluate_separatorLevel(path_model_file, path_data, truth_threshold=0.5, batch_size=1, path_annotated_images=None, device='cuda', replace_dirs='warn', draw_images=True, draw_text_scale=1):
     # Parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
     path_annotated_images = path_annotated_images or path_model_file.parent / 'annotated'
@@ -201,20 +201,23 @@ def evaluate_separatorLevel(path_model_file, path_data, batch_size=1, path_annot
                         except IndexError:
                             continue
 
+                        # Sample data | Padding
+                        shapes = batch.meta.count_separators[sampleNumber]
+
                         # Sample data | Targets
                         targets = {}
-                        targets['row'] = __expand_dim(batch.targets.row[sampleNumber].squeeze().cpu().numpy(), correct_dim_length=1)
-                        targets['col'] = __expand_dim(batch.targets.col[sampleNumber].squeeze().cpu().numpy(), correct_dim_length=1)
+                        targets['row'] = __expand_dim(batch.targets.row[sampleNumber, :shapes['row']].squeeze().cpu().numpy(), correct_dim_length=1)
+                        targets['col'] = __expand_dim(batch.targets.col[sampleNumber, :shapes['col']].squeeze().cpu().numpy(), correct_dim_length=1)
 
                         # Sample data | Predictions
                         predictions = {}
-                        predictions['row'] = __expand_dim((preds.row[sampleNumber].squeeze().cpu().numpy()), correct_dim_length=1) > 0.5
-                        predictions['col'] = __expand_dim((preds.col[sampleNumber].squeeze().cpu().numpy()), correct_dim_length=1) > 0.5
+                        predictions['row'] = __expand_dim((preds.row[sampleNumber, :shapes['row']].squeeze().cpu().numpy()), correct_dim_length=1) > truth_threshold
+                        predictions['col'] = __expand_dim((preds.col[sampleNumber, :shapes['col']].squeeze().cpu().numpy()), correct_dim_length=1) > truth_threshold
 
                         # Sample data | Separator locations
                         locations = {}
-                        locations['row'] = __expand_dim(batch.features.proposedSeparators_row[sampleNumber].squeeze(0).cpu().numpy())
-                        locations['col'] = __expand_dim(batch.features.proposedSeparators_col[sampleNumber].squeeze(0).cpu().numpy())
+                        locations['row'] = __expand_dim(batch.features.proposedSeparators_row[sampleNumber, :shapes['row']].squeeze(0).cpu().numpy())
+                        locations['col'] = __expand_dim(batch.features.proposedSeparators_col[sampleNumber, :shapes['col']].squeeze(0).cpu().numpy())
 
                         if draw_images:
                             # Load image
@@ -266,8 +269,8 @@ def evaluate_separatorLevel(path_model_file, path_data, batch_size=1, path_annot
                                 col_share_correct_removed = (predictions['col'] == targets['col'])[targets['col'] == False].mean()
                                 col_share_wrong = (predictions['col'] != targets['col']).mean()
                                 col_count_wrong = (predictions['col'] != targets['col']).sum()
-                            text = f'Row | True positive ({row_share_correct_retained:.0%}) - True negative ({row_share_correct_removed:.0%}) - Wrong ({row_share_wrong:.0%})[{row_count_wrong}]\nCol | True positive ({col_share_correct_retained:.0%}) - True negative ({col_share_correct_removed:.0%}) - Wrong ({col_share_wrong:.0%})[{col_count_wrong}]'
-                            img_annot_row.multiline_text(xy=(0, 0), text=text, fill='black', font=font_text)
+                            text = f'Row | True positive ({row_share_correct_retained:.0%}) - True negative ({row_share_correct_removed:.0%}) - Wrong ({row_share_wrong:.0%})[{row_count_wrong}]\nCol | True positive ({col_share_correct_retained:.0%}) - True negative ({col_share_correct_removed:.0%}) - Wrong ({col_share_wrong:.0%})[{col_count_wrong}]\nThreshold: {truth_threshold:.1%}'
+                            img_annot_row.multiline_text(xy=(3, 3), text=text, fill='black', font=font_text)
 
                             # Save image
                             img = Image.alpha_composite(img, overlay_row)

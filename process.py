@@ -938,7 +938,7 @@ def preprocess_separatorLevel(path_model_line, path_data, padding=40, batch_size
 
 # Inference
 def predict_and_process(path_model_file, path_data, ground_truth=False, path_words=None, path_pdfs=None, device='cuda', replace_dirs='warn', path_processed=None, padding=40, draw_text_scale=1, truth_threshold=0.5,
-                        out_data=True, out_images=False, out_labels_separators=False, out_labels_rows=False, subtract_one_from_pagenumber=False):
+                        out_data=True, out_images=False, out_labels_separators=False, out_labels_rows=False, subtract_one_from_pagenumber=False, batch_size=1):
     # Parse parameters
     path_model_file = Path(path_model_file); path_data = Path(path_data)
     path_words = path_words or path_data / 'words'
@@ -960,7 +960,7 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
     model = TableSeparatorModel().to(device)
     model.load_state_dict(torch.load(path_model_file))
     model.eval()
-    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data, ground_truth=ground_truth)
+    dataloader = dataloaders.get_dataloader_separatorLevel(dir_data=path_data, ground_truth=ground_truth, batch_size=batch_size)
 
     # Load OCR reader
     reader = easyocr.Reader(lang_list=['nl', 'fr', 'de', 'en'], gpu=True, quantize=True)
@@ -981,7 +981,6 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
             # Convert to data
             batch_size = dataloader.batch_size or dataloader.batch_sampler.batch_size
             for sampleNumber in range(batch_size):
-
                 # Words
                 # Words | Parse sample name
                 image_path = Path(batch.meta.path_image[sampleNumber])
@@ -998,12 +997,12 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                 wordsPath = path_words / f"{name_words}"
 
                 # Words | Use pdf-based words if present
-                tableRect = TableRect(**{key: value[sampleNumber].item() for key, value in batch.meta.table_coords.items()})
-                dpi_pdf = batch.meta.dpi_pdf[sampleNumber].item()
-                dpi_model = batch.meta.dpi_model[sampleNumber].item()
-                padding_model = batch.meta.padding_model[sampleNumber].item()
-                dpi_words = batch.meta.dpi_words[sampleNumber].item()
-                angle = batch.meta.image_angle[sampleNumber].item()
+                tableRect = TableRect(**batch.meta.table_coords[sampleNumber])
+                dpi_pdf = batch.meta.dpi_pdf[sampleNumber]
+                dpi_model = batch.meta.dpi_model[sampleNumber]
+                padding_model = batch.meta.padding_model[sampleNumber]
+                dpi_words = batch.meta.dpi_words[sampleNumber]
+                angle = batch.meta.image_angle[sampleNumber]
 
                 wordsDf = pd.read_parquet(wordsPath).drop_duplicates()
                 wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] = (wordsDf.loc[:, ['left', 'top', 'right', 'bottom']] * (dpi_pdf / dpi_words))
@@ -1024,8 +1023,12 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                 
                 # Cells
                 # Cells | Convert predictions to boundaries
-                separators_row = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_row[sampleNumber]) if preds.row[sampleNumber][idx] >= truth_threshold])
-                separators_col = np.array([separator.cpu().numpy() for idx, separator in enumerate(batch.features.proposedSeparators_col[sampleNumber]) if preds.col[sampleNumber][idx] >= truth_threshold])
+                preds_row_exclPadding = preds.row[sampleNumber][:batch.meta.count_separators[sampleNumber]['row']]
+                preds_col_exclPadding = preds.col[sampleNumber][:batch.meta.count_separators[sampleNumber]['col']]
+                separators_row_exclPadding = batch.features.proposedSeparators_row[sampleNumber][:batch.meta.count_separators[sampleNumber]['row']]
+                separators_col_exclPadding = batch.features.proposedSeparators_col[sampleNumber][:batch.meta.count_separators[sampleNumber]['col']]
+                separators_row = np.array([separator.cpu().numpy() for idx, separator in enumerate(separators_row_exclPadding) if preds_row_exclPadding[idx] >= truth_threshold])
+                separators_col = np.array([separator.cpu().numpy() for idx, separator in enumerate(separators_col_exclPadding) if preds_col_exclPadding[idx] >= truth_threshold])
                 
                 separators_row_wide = parse_separators(separatorArray=separators_row, padding=padding, size=int(img.height//scale_factor), setToMidpoint=False)
                 separators_col_wide = parse_separators(separatorArray=separators_col, padding=padding, size=int(img.width//scale_factor), setToMidpoint=False)
@@ -1045,7 +1048,7 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                         img_array = np.array(img)
 
                         for cell in cells:
-                            textList = reader.readtext(image=img_array[cell['y0']:cell['y1'], cell['x0']:cell['x1']], batch_size=60, detail=1)
+                            textList = reader.readtext(image=img_array[cell['y0']:cell['y1']+1, cell['x0']:cell['x1']+1], batch_size=60, detail=1)
                             if textList:
                                 textList_sorted = sorted(textList, key=lambda el: (el[0][0][1]//15, el[0][0][0]))       # round height to the lowest X to avoid height mismatch from fucking things up
                                 cell['text'] = ' '.join([el[1] for el in textList_sorted])
@@ -1135,8 +1138,9 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                                 img_annot.rectangle(xy=img_annot.textbbox((cell['x0']+1, cell['y0']+1), text=cell['text'], font=FONT_TEXT, anchor='la'), fill=(255, 255, 255, 240), outline=(255, 255, 255, 240), width=2)
                                 img_annot.text(xy=(cell['x0']+1, cell['y0']+1), text=cell['text'], fill=(0, 0, 0, 255), anchor='la', font=FONT_TEXT,)
                         except ValueError:
-                            tqdm.write(f'{name_full}: {cell}')
-                    img_annot.text(xy=(img.width // 2, img.height - 4), text=textSource, font=FONT_BIG, fill=(0, 0, 0, 230), anchor='md')
+                            # tqdm.write(f'{name_full}: {cell}')
+                            pass
+                    img_annot.text(xy=(img.width // 2, img.height - 4), text=f'{textSource} (treshold: {truth_threshold:.1%})', font=FONT_BIG, fill=(0, 0, 0, 230), anchor='md')
                     
                     # Visualise | Save image
                     bg = img.convert('RGBA')
@@ -1163,7 +1167,7 @@ def predict_and_process(path_model_file, path_data, ground_truth=False, path_wor
                     xml_height = etree.SubElement(xml_size, 'height'); xml_height.text = str(int(img.height // scale_factor))
 
                     # Add confidence score (0: all separators 0.5; 1: all separators 0 or 1) (we take 25th percentile of confidence for rows and cols separately)
-                    confidence = torch.mean(torch.stack([torch.quantile(torch.abs((preds.row[sampleNumber].squeeze() - 0.5)), q=0.5), torch.quantile(torch.abs((preds.col[sampleNumber].squeeze() - 0.5)), q=0.5)]))*2
+                    confidence = torch.mean(torch.stack([torch.quantile(torch.abs((preds_row_exclPadding.squeeze() - 0.5)), q=0.5), torch.quantile(torch.abs((preds_col_exclPadding.squeeze() - 0.5)), q=0.5)]))*2
                     xml_confidence = etree.SubElement(xml, 'confidence_score'); xml_confidence.text = f'{confidence.item():0.3f}'
                     
                     # Add table bbox
